@@ -3,23 +3,35 @@ import { createRun } from "@/lib/runs/service";
 import { appendRunEvent, getRunEventsAfter } from "@/lib/runs/events";
 import { getDb } from "@/lib/db/client";
 import {
+  deterministicChecks,
   ingestionArtifacts,
   runErrors,
   runEvents,
+  runWorkers,
   runs,
+  taskAgentState,
   taskAttempts,
   taskEvaluations,
+  taskExecutions,
+  taskStepCitations,
+  taskSteps,
   tasks,
 } from "@/lib/db/schema";
 
 async function resetDb(): Promise<void> {
   const db = await getDb();
   await db.delete(runErrors);
+  await db.delete(deterministicChecks);
+  await db.delete(taskStepCitations);
+  await db.delete(taskSteps);
+  await db.delete(taskAgentState);
+  await db.delete(taskExecutions);
   await db.delete(taskEvaluations);
   await db.delete(taskAttempts);
   await db.delete(tasks);
   await db.delete(ingestionArtifacts);
   await db.delete(runEvents);
+  await db.delete(runWorkers);
   await db.delete(runs);
 }
 

@@ -13,6 +13,11 @@ export interface CorpusChunk {
   snippetHash: string;
 }
 
+export interface ScoredChunk {
+  chunk: CorpusChunk;
+  score: number;
+}
+
 function tokenize(text: string): string[] {
   return text
     .toLowerCase()
@@ -80,7 +85,11 @@ export function buildCorpusChunks(artifacts: RetrievalArtifact[]): CorpusChunk[]
   return chunks;
 }
 
-export function retrieveTopChunks(chunks: CorpusChunk[], query: string, topK = 8): CorpusChunk[] {
+export function retrieveTopChunksWithScores(
+  chunks: CorpusChunk[],
+  query: string,
+  topK = 8,
+): ScoredChunk[] {
   const queryTokens = new Set(tokenize(query));
 
   const scored = chunks
@@ -100,9 +109,20 @@ export function retrieveTopChunks(chunks: CorpusChunk[], query: string, topK = 8
         score: normalizedScore,
       };
     })
-    .sort((a, b) => b.score - a.score)
-    .slice(0, topK)
-    .map((entry) => entry.chunk);
+    .sort((a, b) => {
+      if (b.score !== a.score) {
+        return b.score - a.score;
+      }
+
+      const aTie = `${a.chunk.sourceUrl}::${a.chunk.snippetHash}`;
+      const bTie = `${b.chunk.sourceUrl}::${b.chunk.snippetHash}`;
+      return aTie.localeCompare(bTie);
+    })
+    .slice(0, topK);
 
   return scored;
+}
+
+export function retrieveTopChunks(chunks: CorpusChunk[], query: string, topK = 8): CorpusChunk[] {
+  return retrieveTopChunksWithScores(chunks, query, topK).map((entry) => entry.chunk);
 }

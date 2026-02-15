@@ -22,6 +22,9 @@ const envSchema = z.object({
   DEFAULT_TASK_COUNT: z.coerce.number().int().min(1).max(200).default(10),
   DEFAULT_EXECUTION_CONCURRENCY: z.coerce.number().int().min(1).max(20).default(3),
   DEFAULT_JUDGE_CONCURRENCY: z.coerce.number().int().min(1).max(20).default(3),
+  DEFAULT_WORKER_COUNT: z.coerce.number().int().min(1).max(12).default(3),
+  MAX_WORKER_COUNT: z.coerce.number().int().min(1).max(64).default(12),
+  DEFAULT_MAX_STEPS_PER_TASK: z.coerce.number().int().min(1).max(64).default(8),
   DEFAULT_MAX_TOKENS_PER_TASK: z.coerce.number().int().min(256).max(32000).default(5000),
   DEFAULT_HARD_COST_CAP_USD: z.coerce.number().min(0).max(10000).default(10),
 });
@@ -90,8 +93,20 @@ export function buildDefaultRunConfig(taskCount?: number): Omit<RunConfig, "budg
     tieBreakEnabled: false,
     budget: {
       maxTasks: taskCount ?? env.DEFAULT_TASK_COUNT,
+      maxStepsPerTask: env.DEFAULT_MAX_STEPS_PER_TASK,
       maxTokensPerTask: env.DEFAULT_MAX_TOKENS_PER_TASK,
       hardCostCapUsd: env.DEFAULT_HARD_COST_CAP_USD,
     },
+    workerConfig: {
+      workerCount: env.DEFAULT_WORKER_COUNT,
+      assignments: [
+        {
+          provider: buildDefaultModelConfig("run").provider,
+          model: buildDefaultModelConfig("run").model,
+          quantity: env.DEFAULT_WORKER_COUNT,
+        },
+      ],
+    },
+    userDefinedTasks: [],
   };
 }

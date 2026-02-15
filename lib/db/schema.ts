@@ -1,4 +1,4 @@
-import { index, integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const runs = sqliteTable("runs", {
   id: text("id").primaryKey(),
@@ -40,7 +40,10 @@ export const tasks = sqliteTable(
     status: text("status").notNull(),
     createdAt: integer("created_at").notNull(),
   },
-  (table) => [index("tasks_run_id_idx").on(table.runId), index("tasks_run_task_idx").on(table.runId, table.taskId)],
+  (table) => [
+    index("tasks_run_id_idx").on(table.runId),
+    index("tasks_run_task_idx").on(table.runId, table.taskId),
+  ],
 );
 
 export const taskAttempts = sqliteTable(
@@ -87,7 +90,10 @@ export const runEvents = sqliteTable(
     payloadJson: text("payload_json").notNull(),
     createdAt: integer("created_at").notNull(),
   },
-  (table) => [index("run_events_run_seq_idx").on(table.runId, table.seq)],
+  (table) => [
+    index("run_events_run_seq_idx").on(table.runId, table.seq),
+    index("run_events_run_id_id_idx").on(table.runId, table.id),
+  ],
 );
 
 export const runErrors = sqliteTable(
@@ -102,6 +108,116 @@ export const runErrors = sqliteTable(
     createdAt: integer("created_at").notNull(),
   },
   (table) => [index("run_errors_run_id_idx").on(table.runId)],
+);
+
+export const runWorkers = sqliteTable(
+  "run_workers",
+  {
+    id: integer("id", { mode: "number" }).primaryKey({ autoIncrement: true }),
+    runId: text("run_id").notNull(),
+    workerLabel: text("worker_label").notNull(),
+    modelProvider: text("model_provider").notNull(),
+    modelName: text("model_name").notNull(),
+    modelConfigJson: text("model_config_json").notNull(),
+    status: text("status").notNull(),
+    startedAt: integer("started_at").notNull(),
+    endedAt: integer("ended_at"),
+  },
+  (table) => [
+    index("run_workers_run_id_idx").on(table.runId),
+    uniqueIndex("run_workers_run_label_unq").on(table.runId, table.workerLabel),
+  ],
+);
+
+export const taskExecutions = sqliteTable(
+  "task_executions",
+  {
+    id: integer("id", { mode: "number" }).primaryKey({ autoIncrement: true }),
+    runId: text("run_id").notNull(),
+    taskId: text("task_id").notNull(),
+    workerId: integer("worker_id"),
+    status: text("status").notNull(),
+    stepCount: integer("step_count").notNull().default(0),
+    tokensInTotal: integer("tokens_in_total").notNull().default(0),
+    tokensOutTotal: integer("tokens_out_total").notNull().default(0),
+    costEstimateTotal: real("cost_estimate_total").notNull().default(0),
+    stopReason: text("stop_reason"),
+    startedAt: integer("started_at").notNull(),
+    endedAt: integer("ended_at"),
+  },
+  (table) => [
+    index("task_executions_run_id_idx").on(table.runId),
+    index("task_executions_task_id_idx").on(table.taskId),
+    index("task_executions_worker_id_idx").on(table.workerId),
+  ],
+);
+
+export const taskAgentState = sqliteTable(
+  "task_agent_state",
+  {
+    id: integer("id", { mode: "number" }).primaryKey({ autoIncrement: true }),
+    taskExecutionId: integer("task_execution_id").notNull(),
+    currentStep: integer("current_step").notNull(),
+    goalJson: text("goal_json").notNull(),
+    planJson: text("plan_json").notNull(),
+    visitedSourcesJson: text("visited_sources_json").notNull(),
+    factsJson: text("facts_json").notNull(),
+    stepSummariesJson: text("step_summaries_json").notNull(),
+    remainingBudgetJson: text("remaining_budget_json").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("task_agent_state_execution_unq").on(table.taskExecutionId),
+    index("task_agent_state_execution_idx").on(table.taskExecutionId),
+  ],
+);
+
+export const taskSteps = sqliteTable(
+  "task_steps",
+  {
+    id: integer("id", { mode: "number" }).primaryKey({ autoIncrement: true }),
+    taskExecutionId: integer("task_execution_id").notNull(),
+    stepIndex: integer("step_index").notNull(),
+    phase: text("phase").notNull(),
+    inputJson: text("input_json").notNull(),
+    outputJson: text("output_json").notNull(),
+    retrievalJson: text("retrieval_json"),
+    usageJson: text("usage_json"),
+    decisionJson: text("decision_json"),
+    createdAt: integer("created_at").notNull(),
+  },
+  (table) => [
+    index("task_steps_execution_idx").on(table.taskExecutionId),
+    index("task_steps_execution_step_idx").on(table.taskExecutionId, table.stepIndex),
+  ],
+);
+
+export const taskStepCitations = sqliteTable(
+  "task_step_citations",
+  {
+    id: integer("id", { mode: "number" }).primaryKey({ autoIncrement: true }),
+    taskStepId: integer("task_step_id").notNull(),
+    sourceUrl: text("source_url").notNull(),
+    snippetHash: text("snippet_hash"),
+    excerpt: text("excerpt").notNull(),
+    startOffset: integer("start_offset"),
+    endOffset: integer("end_offset"),
+  },
+  (table) => [index("task_step_citations_step_idx").on(table.taskStepId)],
+);
+
+export const deterministicChecks = sqliteTable(
+  "deterministic_checks",
+  {
+    id: integer("id", { mode: "number" }).primaryKey({ autoIncrement: true }),
+    taskExecutionId: integer("task_execution_id").notNull(),
+    checkName: text("check_name").notNull(),
+    passed: integer("passed", { mode: "boolean" }).notNull(),
+    scoreDelta: real("score_delta").notNull().default(0),
+    detailsJson: text("details_json"),
+    createdAt: integer("created_at").notNull(),
+  },
+  (table) => [index("deterministic_checks_execution_idx").on(table.taskExecutionId)],
 );
 
 export type RunRow = typeof runs.$inferSelect;

@@ -76,6 +76,23 @@ function dedupeTasks(tasks: Omit<GeneratedTask, "taskId">[]): Omit<GeneratedTask
   return [...map.values()];
 }
 
+function normalizeUserTasks(input: TaskGenerationInput): Omit<GeneratedTask, "taskId">[] {
+  const tasks = input.userDefinedTasks ?? [];
+
+  return tasks
+    .filter((task) => task.name.trim() && task.description.trim())
+    .map((task) => ({
+      name: task.name.trim(),
+      description: task.description.trim(),
+      category: task.category ?? inferCategory(task.name),
+      difficulty: task.difficulty ?? "medium",
+      expectedSignals:
+        task.expectedSignals && task.expectedSignals.length > 0
+          ? task.expectedSignals
+          : [task.name, "step-by-step", "citations"],
+    }));
+}
+
 const fallbackCategories: TaskCategory[] = [
   "getting-started",
   "authentication",
@@ -105,9 +122,10 @@ function makeFallbackTask(index: number): Omit<GeneratedTask, "taskId"> {
 }
 
 export function generateTasks(input: TaskGenerationInput): GeneratedTask[] {
+  const userDefinedTasks = normalizeUserTasks(input);
   const templateTasks = TASK_TEMPLATES;
   const docAwareTasks = makeDocAwareTasks(input);
-  const deduped = dedupeTasks([...templateTasks, ...docAwareTasks]);
+  const deduped = dedupeTasks([...userDefinedTasks, ...templateTasks, ...docAwareTasks]);
   const targetCount = input.maxTasks;
   const filled: Omit<GeneratedTask, "taskId">[] = [...deduped];
 

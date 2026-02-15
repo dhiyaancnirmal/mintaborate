@@ -7,6 +7,7 @@ import type { GeneratedTask } from "@/lib/tasks/types";
 import { PASS_THRESHOLD, alignmentSchema, rubricScoreSchema } from "@/lib/evaluation/rubric";
 import { classifyFailureClass } from "@/lib/evaluation/failure-classifier";
 import type { CriterionScores, TaskEvaluationResult } from "@/lib/scoring/types";
+import type { DeterministicGuards } from "@/lib/evaluation/deterministic-checks";
 
 const scoreShapeSchema = z.object({
   completeness: z.number().min(0).max(10),
@@ -26,6 +27,7 @@ function applyGuardrails(input: {
   rawScores: Omit<CriterionScores, "average">;
   attempt: AgentTaskAttempt;
   unsupportedClaims: string[];
+  deterministicGuards?: DeterministicGuards;
 }): CriterionScores {
   const next = { ...input.rawScores };
 
@@ -40,6 +42,22 @@ function applyGuardrails(input: {
   if (input.unsupportedClaims.length > 0) {
     next.correctness = Math.min(next.correctness, 6);
     next.groundedness = Math.min(next.groundedness, 5);
+  }
+
+  if (input.deterministicGuards?.groundednessCap !== undefined) {
+    next.groundedness = Math.min(next.groundedness, input.deterministicGuards.groundednessCap);
+  }
+
+  if (input.deterministicGuards?.correctnessCap !== undefined) {
+    next.correctness = Math.min(next.correctness, input.deterministicGuards.correctnessCap);
+  }
+
+  if (input.deterministicGuards?.completenessCap !== undefined) {
+    next.completeness = Math.min(next.completeness, input.deterministicGuards.completenessCap);
+  }
+
+  if (input.deterministicGuards?.actionabilityCap !== undefined) {
+    next.actionability = Math.min(next.actionability, input.deterministicGuards.actionabilityCap);
   }
 
   return {
@@ -150,6 +168,7 @@ export async function judgeTaskAttempt(input: {
   attempt: AgentTaskAttempt;
   chunks: CorpusChunk[];
   tieBreakEnabled: boolean;
+  deterministicGuards?: DeterministicGuards;
 }): Promise<TaskEvaluationResult> {
   const alignment = await evaluateAlignment(input);
   const baseRubric = await evaluateRubric({
@@ -165,6 +184,7 @@ export async function judgeTaskAttempt(input: {
     rawScores,
     attempt: input.attempt,
     unsupportedClaims: alignment.unsupportedClaims,
+    deterministicGuards: input.deterministicGuards,
   });
 
   let finalScores = initial;
@@ -183,6 +203,7 @@ export async function judgeTaskAttempt(input: {
       rawScores,
       attempt: input.attempt,
       unsupportedClaims: alignment.unsupportedClaims,
+      deterministicGuards: input.deterministicGuards,
     });
 
     finalScores = {
@@ -194,11 +215,15 @@ export async function judgeTaskAttempt(input: {
     };
   }
 
-  const pass = finalScores.average >= PASS_THRESHOLD && alignment.isSupportedByEvidence;
+  const passBlocked = (input.deterministicGuards?.passBlockedReasons.length ?? 0) > 0;
+  const pass = finalScores.average >= PASS_THRESHOLD && alignment.isSupportedByEvidence && !passBlocked;
 
   const rationale = [
     baseRubric.rationale,
     alignment.notes ? `Alignment: ${alignment.notes}` : null,
+    passBlocked
+      ? `Deterministic blocks: ${input.deterministicGuards?.passBlockedReasons.join(", ")}`
+      : null,
   ]
     .filter(Boolean)
     .join(" ")
@@ -219,5 +244,7 @@ export async function judgeTaskAttempt(input: {
     rationale,
     confidence: baseRubric.confidence,
     criterionScores: finalScores,
+    deterministicChecks: input.deterministicGuards?.checks,
+    passBlocked,
   };
 }

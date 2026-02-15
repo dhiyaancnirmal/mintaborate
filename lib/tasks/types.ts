@@ -1,4 +1,4 @@
-import type { TaskCategory, TaskDifficulty } from "@/lib/runs/types";
+import type { TaskCategory, TaskDifficulty, UserDefinedTask } from "@/lib/runs/types";
 
 export interface GeneratedTask {
   taskId: string;
@@ -15,4 +15,5 @@ export interface TaskGenerationInput {
   llmsText?: string;
   llmsFullText?: string;
   skillText?: string;
+  userDefinedTasks?: UserDefinedTask[];
 }

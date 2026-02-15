@@ -15,6 +15,13 @@ export interface TaskEvaluationResult {
   rationale: string;
   confidence: number;
   criterionScores: CriterionScores;
+  deterministicChecks?: Array<{
+    name: string;
+    passed: boolean;
+    scoreDelta: number;
+    details?: Record<string, unknown>;
+  }>;
+  passBlocked?: boolean;
 }
 
 export interface RunAggregateScore {
