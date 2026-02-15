@@ -216,7 +216,6 @@ async function executeRun(runId: string): Promise<void> {
             await updateRunStatus(runId, "running");
           } catch (error) {
             const message = asErrorMessage(error);
-            await updateTaskStatus(runId, task.taskId, "error");
 
             const fallbackEvaluation: TaskEvaluationResult = {
               taskId: task.taskId,
@@ -234,6 +233,7 @@ async function executeRun(runId: string): Promise<void> {
             };
 
             evaluations.push(fallbackEvaluation);
+            await persistTaskEvaluation(runId, fallbackEvaluation, refreshedRun.config.judgeModel.model);
 
             await persistRunError({
               runId,

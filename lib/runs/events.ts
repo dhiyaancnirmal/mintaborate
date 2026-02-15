@@ -4,6 +4,7 @@ import { runEvents } from "@/lib/db/schema";
 import type { RunEventPayload } from "@/lib/runs/types";
 
 export interface PersistedRunEvent {
+  id: number;
   seq: number;
   eventType: string;
   payload: RunEventPayload;
@@ -37,7 +38,7 @@ export async function appendRunEvent(
 
 export async function getRunEventsAfter(
   runId: string,
-  afterSeq: number,
+  afterId: number,
   limit = 100,
 ): Promise<PersistedRunEvent[]> {
   const db = await getDb();
@@ -45,11 +46,12 @@ export async function getRunEventsAfter(
   const rows = await db
     .select()
     .from(runEvents)
-    .where(and(eq(runEvents.runId, runId), gt(runEvents.seq, afterSeq)))
-    .orderBy(asc(runEvents.seq))
+    .where(and(eq(runEvents.runId, runId), gt(runEvents.id, afterId)))
+    .orderBy(asc(runEvents.id))
     .limit(limit);
 
   return rows.map((row) => ({
+    id: row.id,
     seq: row.seq,
     eventType: row.eventType,
     payload: JSON.parse(row.payloadJson) as RunEventPayload,

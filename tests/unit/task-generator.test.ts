@@ -22,4 +22,15 @@ describe("generateTasks", () => {
     const uniqueNames = new Set(tasks.map((task) => task.name));
     expect(uniqueNames.size).toBe(tasks.length);
   });
+
+  it("fills to requested task count when docs coverage is sparse", () => {
+    const tasks = generateTasks({
+      docsUrl: "https://docs.example.com",
+      maxTasks: 30,
+      llmsText: "# Minimal Docs",
+      llmsFullText: "",
+    });
+
+    expect(tasks.length).toBe(30);
+  });
 });

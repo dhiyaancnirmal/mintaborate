@@ -49,8 +49,7 @@ function extractHeadings(input?: string): string[] {
 
 function makeDocAwareTasks(input: TaskGenerationInput): Omit<GeneratedTask, "taskId">[] {
   const headings = extractHeadings(input.llmsText).concat(extractHeadings(input.llmsFullText));
-
-  const selected = headings.slice(0, 12);
+  const selected = headings.slice(0, 120);
 
   return selected.map((heading) => {
     const category = inferCategory(heading);
@@ -77,11 +76,48 @@ function dedupeTasks(tasks: Omit<GeneratedTask, "taskId">[]): Omit<GeneratedTask
   return [...map.values()];
 }
 
+const fallbackCategories: TaskCategory[] = [
+  "getting-started",
+  "authentication",
+  "core-feature",
+  "integration",
+  "deployment",
+  "troubleshooting",
+];
+
+function makeFallbackTask(index: number): Omit<GeneratedTask, "taskId"> {
+  const category = fallbackCategories[index % fallbackCategories.length];
+
+  return {
+    name: `Documentation Coverage Probe ${index + 1}`,
+    description:
+      "Use the documentation to complete one representative workflow for this category with exact prerequisites, commands/API calls, and verification steps.",
+    category,
+    difficulty: index % 3 === 0 ? "easy" : index % 3 === 1 ? "medium" : "hard",
+    expectedSignals: [
+      "prerequisites",
+      "step-by-step",
+      "example",
+      "verification",
+      "failure handling",
+    ],
+  };
+}
+
 export function generateTasks(input: TaskGenerationInput): GeneratedTask[] {
   const templateTasks = TASK_TEMPLATES;
   const docAwareTasks = makeDocAwareTasks(input);
+  const deduped = dedupeTasks([...templateTasks, ...docAwareTasks]);
+  const targetCount = input.maxTasks;
+  const filled: Omit<GeneratedTask, "taskId">[] = [...deduped];
 
-  const combined = dedupeTasks([...templateTasks, ...docAwareTasks]).slice(0, input.maxTasks);
+  let fallbackIndex = 0;
+  while (filled.length < targetCount) {
+    filled.push(makeFallbackTask(fallbackIndex));
+    fallbackIndex += 1;
+  }
+
+  const combined = dedupeTasks(filled).slice(0, targetCount);
 
   return combined.map((task) => ({
     ...task,

@@ -29,7 +29,7 @@ export async function GET(
 
   const stream = new ReadableStream({
     async start(controller) {
-      let lastSeq = Number(request.headers.get("last-event-id") ?? 0);
+      let lastEventId = Number(request.headers.get("last-event-id") ?? 0);
       let closed = false;
       let interval: NodeJS.Timeout | undefined;
 
@@ -59,18 +59,19 @@ export async function GET(
           return;
         }
 
-        const events = await getRunEventsAfter(runId, lastSeq, 100);
+        const events = await getRunEventsAfter(runId, lastEventId, 100);
         for (const event of events) {
-          lastSeq = event.seq;
+          lastEventId = event.id;
           send(
             {
+              id: event.id,
               seq: event.seq,
               eventType: event.eventType,
               payload: event.payload,
               createdAt: event.createdAt,
             },
             "message",
-            event.seq,
+            event.id,
           );
         }
 
