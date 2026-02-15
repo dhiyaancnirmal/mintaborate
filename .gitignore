@@ -1,0 +1,12 @@
+node_modules
+.next
+out
+dist
+coverage
+.env.local
+.env
+.data
+.DS_Store
+data/*.db
+data/*.db-*
+tsconfig.tsbuildinfo
