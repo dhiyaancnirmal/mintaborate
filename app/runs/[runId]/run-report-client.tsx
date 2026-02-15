@@ -1,41 +1,65 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  StatusDot,
+  MonoLabel,
+  Card,
+  MetricCard,
+  Button,
+  ScoreBar,
+  Badge,
+} from "@/components/ui/primitives";
+import {
+  formatTimestamp,
+  formatDuration,
+  formatCost,
+  isActiveStatus,
+} from "@/lib/ui/format";
+import type { RunEventPayload } from "@/lib/runs/types";
 
-type TaskEvaluation = {
+/* ─── Types ──────────────────────────────────────────────── */
+
+interface CriterionScores {
+  completeness: number;
+  correctness: number;
+  groundedness: number;
+  actionability: number;
+  average: number;
+}
+
+interface TaskEvaluation {
   taskId: string;
   pass: boolean;
   failureClass: string | null;
   rationale: string;
-  criterionScores: {
-    completeness: number;
-    correctness: number;
-    groundedness: number;
-    actionability: number;
-    average: number;
-  };
-  passBlocked?: boolean;
-};
+  confidence: number;
+  criterionScores: CriterionScores;
+}
 
-type TaskResult = {
+interface TaskView {
   taskId: string;
   name: string;
   description: string;
+  category: string;
+  difficulty: string;
   status: string;
+  expectedSignals: string[];
   evaluation: TaskEvaluation | null;
-};
+}
 
-type WorkerResult = {
+interface WorkerView {
   id: number;
   workerLabel: string;
   modelProvider: string;
   modelName: string;
   status: string;
-};
+}
 
-type TaskExecution = {
+interface TaskExecutionView {
   id: number;
   taskId: string;
+  phase: string;
   workerId: number | null;
   status: string;
   stepCount: number;
@@ -43,9 +67,11 @@ type TaskExecution = {
   tokensOutTotal: number;
   costEstimateTotal: number;
   stopReason: string | null;
-};
+  startedAt: number;
+  endedAt: number | null;
+}
 
-type StepTrace = {
+interface StepTraceView {
   id: number;
   taskExecutionId: number;
   stepIndex: number;
@@ -53,37 +79,50 @@ type StepTrace = {
   input: unknown;
   output: unknown;
   retrieval: unknown;
-  usage: {
-    inputTokens?: number;
-    outputTokens?: number;
-    latencyMs?: number;
-    costEstimateUsd?: number;
-  } | null;
-  decision: {
-    shouldContinue?: boolean;
-    stopReason?: string;
-    confidence?: number;
-  } | null;
-  citations: Array<{
-    source: string;
-    snippetHash?: string;
-    excerpt: string;
-  }>;
+  usage: unknown;
+  decision: unknown;
+  citations: Array<{ source: string; excerpt: string }>;
   createdAt: number;
-};
+}
 
-type EventMessage = {
+interface RunAggregateScore {
+  totalTasks: number;
+  passedTasks: number;
+  failedTasks: number;
+  passRate: number;
+  averageScore: number;
+  failureBreakdown: Record<string, number>;
+}
+
+interface OptimizationData {
+  status: string;
+  baselineTotals: RunAggregateScore | null;
+  optimizedTotals: RunAggregateScore | null;
+  delta: {
+    passRateDelta: number;
+    averageScoreDelta: number;
+    passedTasksDelta: number;
+    failedTasksDelta: number;
+  } | null;
+  taskComparisons: Array<{
+    taskId: string;
+    baselinePass: boolean | null;
+    optimizedPass: boolean | null;
+    baselineScore: number | null;
+    optimizedScore: number | null;
+  }>;
+  optimizationNotes: string[];
+}
+
+interface EventMessage {
   id: number;
   seq: number;
   eventType: string;
-  payload: {
-    message?: string;
-    data?: Record<string, unknown>;
-  };
+  payload: RunEventPayload;
   createdAt: number;
-};
+}
 
-type RunDetail = {
+interface RunDetail {
   run: {
     id: string;
     docsUrl: string;
@@ -98,263 +137,649 @@ type RunDetail = {
       averageScore: number;
       failureBreakdown: Record<string, number>;
     } | null;
+    config: {
+      runModel: { provider: string; model: string };
+      judgeModel: { provider: string; model: string };
+      budget: {
+        maxTasks: number;
+        maxStepsPerTask: number;
+        maxTokensPerTask: number;
+        hardCostCapUsd: number;
+      };
+      executionConcurrency: number;
+    };
   };
-  tasks: TaskResult[];
-  workers: WorkerResult[];
-  taskExecutions: TaskExecution[];
-  recentSteps: StepTrace[];
+  tasks: TaskView[];
+  workers: WorkerView[];
+  taskExecutions: TaskExecutionView[];
+  recentSteps: StepTraceView[];
   recentEvents: EventMessage[];
-};
+  optimization: OptimizationData;
+}
+
+/* ─── Component ──────────────────────────────────────────── */
 
 export default function RunReportClient({ runId }: { runId: string }) {
   const [detail, setDetail] = useState<RunDetail | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [events, setEvents] = useState<EventMessage[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
-  const closedRef = useRef(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const eventLogRef = useRef<HTMLDivElement>(null);
 
-  const load = useCallback(async () => {
+  const fetchDetail = useCallback(async () => {
     const res = await fetch(`/api/runs/${runId}`, { cache: "no-store" });
-    if (!res.ok) {
-      throw new Error("Failed to load run");
-    }
-    const data = (await res.json()) as RunDetail;
-    setDetail(data);
-    setEvents(data.recentEvents.slice(-200));
+    if (!res.ok) throw new Error("Failed to load run");
+    return (await res.json()) as RunDetail;
   }, [runId]);
 
   useEffect(() => {
-    void load().catch((err) => {
-      setError(err instanceof Error ? err.message : "Unknown error");
-    });
-  }, [load]);
+    fetchDetail()
+      .then((d) => {
+        setDetail(d);
+        setEvents(d.recentEvents);
+        setLoading(false);
+      })
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : "Failed to load");
+        setLoading(false);
+      });
+  }, [fetchDetail]);
 
   useEffect(() => {
-    if (closedRef.current) {
-      return;
+    const es = new EventSource(`/api/runs/${runId}/events`);
+
+    es.addEventListener("message", () => {
+      fetchDetail()
+        .then((d) => {
+          setDetail(d);
+          setEvents(d.recentEvents);
+        })
+        .catch(() => {});
+    });
+
+    es.addEventListener("done", () => {
+      fetchDetail()
+        .then((d) => {
+          setDetail(d);
+          setEvents(d.recentEvents);
+        })
+        .catch(() => {});
+      es.close();
+    });
+
+    return () => { es.close(); };
+  }, [runId, fetchDetail]);
+
+  useEffect(() => {
+    if (eventLogRef.current) {
+      eventLogRef.current.scrollTop = eventLogRef.current.scrollHeight;
     }
+  }, [events]);
 
-    const source = new EventSource(`/api/runs/${runId}/events`);
+  async function handleCancel() {
+    await fetch(`/api/runs/${runId}/cancel`, { method: "POST" });
+    const d = await fetchDetail();
+    setDetail(d);
+  }
 
-    source.onmessage = (event) => {
-      try {
-        const parsed = JSON.parse(event.data) as EventMessage;
-        setEvents((prev) => {
-          const next = [...prev, parsed];
-          return next.slice(-300);
-        });
-      } catch {
-        // Ignore malformed event payloads.
-      }
+  const totals = detail?.run.totals;
+  const active = detail ? isActiveStatus(detail.run.status) : false;
 
-      void load().catch(() => {
-        // Keep event stream alive even if periodic snapshot fetch fails.
-      });
-    };
-
-    source.onerror = () => {
-      source.close();
-      closedRef.current = true;
-    };
-
-    return () => {
-      source.close();
-      closedRef.current = true;
-    };
-  }, [load, runId]);
-
-  const scoreLabel = useMemo(() => {
-    if (!detail?.run.totals) {
-      return "Pending";
-    }
-    return `${detail.run.totals.passedTasks}/${detail.run.totals.totalTasks} passed`;
-  }, [detail?.run.totals]);
-
-  const activeWorkers = useMemo(
-    () => detail?.workers.filter((worker) => worker.status === "running").length ?? 0,
-    [detail?.workers],
+  const selectedTask = useMemo(
+    () => detail?.tasks.find((t) => t.taskId === selectedTaskId) ?? null,
+    [detail, selectedTaskId],
   );
 
-  const selectedTaskSteps = useMemo(() => {
-    if (!detail) {
-      return [];
-    }
+  const selectedExecution = useMemo(
+    () => detail?.taskExecutions.find((te) => te.taskId === selectedTaskId) ?? null,
+    [detail, selectedTaskId],
+  );
 
-    const taskId = selectedTaskId ?? detail.tasks[0]?.taskId;
-    if (!taskId) {
-      return [];
-    }
+  const selectedSteps = useMemo(
+    () =>
+      selectedExecution
+        ? detail?.recentSteps.filter((s) => s.taskExecutionId === selectedExecution.id) ?? []
+        : [],
+    [detail, selectedExecution],
+  );
 
-    const executionIds = detail.taskExecutions
-      .filter((execution) => execution.taskId === taskId)
-      .map((execution) => execution.id);
+  const failureBreakdown = useMemo(() => {
+    if (!totals?.failureBreakdown) return [];
+    return Object.entries(totals.failureBreakdown).filter(([, count]) => count > 0);
+  }, [totals]);
 
-    return detail.recentSteps.filter((step) => executionIds.includes(step.taskExecutionId));
-  }, [detail, selectedTaskId]);
+  /* ─── Loading / Error States ─── */
 
-  async function cancelRun() {
-    try {
-      const res = await fetch(`/api/runs/${runId}/cancel`, { method: "POST" });
-      if (!res.ok) {
-        throw new Error("Failed to cancel run");
-      }
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to cancel");
-    }
-  }
-
-  if (error) {
+  if (loading) {
     return (
-      <main className="mx-auto max-w-6xl px-6 py-10">
-        <p className="text-red-400">{error}</p>
+      <main style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <MonoLabel>Loading run...</MonoLabel>
       </main>
     );
   }
 
-  if (!detail) {
+  if (error || !detail) {
     return (
-      <main className="mx-auto max-w-6xl px-6 py-10">
-        <p className="text-zinc-400">Loading run...</p>
+      <main style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <p style={{ color: "var(--status-fail)", fontFamily: "var(--font-mono)", fontSize: 13 }}>
+          {error ?? "Run not found"}
+        </p>
       </main>
     );
   }
+
+  /* ─── Render ─── */
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-6xl flex-col gap-6 px-6 py-10">
-      <section className="rounded-xl border border-zinc-800 bg-zinc-950/50 p-5">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <h1 className="text-2xl font-semibold">Run {detail.run.id}</h1>
-            <p className="mt-1 text-sm text-zinc-400">{detail.run.docsUrl}</p>
-            <p className="mt-1 text-xs uppercase text-zinc-500">{detail.run.status}</p>
-            <p className="mt-1 text-xs text-zinc-500">
-              Workers active: {activeWorkers}/{detail.workers.length}
-            </p>
-          </div>
-          <div className="text-right">
-            <p className="text-sm text-zinc-400">Score</p>
-            <p className="text-2xl font-semibold text-[#24E07E]">{scoreLabel}</p>
-            {detail.run.status !== "completed" && detail.run.status !== "failed" &&
-            detail.run.status !== "canceled" ? (
-              <button
-                type="button"
-                onClick={cancelRun}
-                className="mt-3 rounded-md border border-red-500 px-3 py-1 text-xs text-red-300"
-              >
-                Cancel Run
-              </button>
-            ) : null}
-          </div>
+    <main style={{ minHeight: "100vh" }}>
+      {/* Header Bar */}
+      <header
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          height: 48,
+          padding: "0 24px",
+          borderBottom: "1px solid var(--border-default)",
+          background: "var(--surface-0)",
+        }}
+      >
+        <a href="/" style={{ display: "flex", alignItems: "center", gap: 8, textDecoration: "none" }}>
+          <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "var(--accent)" }} />
+          <span
+            style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: 13,
+              fontWeight: 600,
+              textTransform: "uppercase",
+              letterSpacing: "0.1em",
+              color: "var(--text-primary)",
+            }}
+          >
+            Mintaborate
+          </span>
+        </a>
+        <a
+          href="https://mintlify.com"
+          target="_blank"
+          rel="noreferrer"
+          style={{
+            fontFamily: "var(--font-mono)",
+            fontSize: 11,
+            fontWeight: 500,
+            textTransform: "uppercase",
+            letterSpacing: "0.06em",
+            color: "var(--text-secondary)",
+            textDecoration: "none",
+            padding: "6px 12px",
+            border: "1px solid var(--border-emphasis)",
+            borderRadius: "var(--radius)",
+          }}
+        >
+          Mintlify
+        </a>
+      </header>
+
+      <div style={{ maxWidth: 1200, margin: "0 auto", padding: "24px 24px 48px" }}>
+        {/* Run Header */}
+        <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap", marginBottom: 24 }}>
+          <StatusDot status={detail.run.status} size={12} />
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 16, fontWeight: 600, color: "var(--text-primary)" }}>
+            {detail.run.id}
+          </span>
+          <MonoLabel>{detail.run.status}</MonoLabel>
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-secondary)" }}>
+            {detail.run.docsUrl}
+          </span>
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-muted)" }}>
+            {formatDuration(detail.run.startedAt, detail.run.endedAt)}
+          </span>
+          {active && (
+            <Button variant="danger" onClick={handleCancel} style={{ marginLeft: "auto" }}>
+              Cancel
+            </Button>
+          )}
         </div>
-      </section>
 
-      <section className="space-y-3">
-        <h2 className="text-lg font-medium">Workers</h2>
-        <div className="grid gap-2 md:grid-cols-2">
-          {detail.workers.map((worker) => (
-            <div key={worker.id} className="rounded-lg border border-zinc-800 p-3 text-xs">
-              <p className="font-medium">{worker.workerLabel}</p>
-              <p className="text-zinc-400">{worker.modelProvider}:{worker.modelName}</p>
-              <p className="mt-1 uppercase text-zinc-500">{worker.status}</p>
-            </div>
-          ))}
+        {/* Metrics Row */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 12, marginBottom: 24 }}>
+          <MetricCard label="Total Tasks" value={totals?.totalTasks ?? detail.tasks.length} />
+          <MetricCard label="Passed" value={totals?.passedTasks ?? 0} accent />
+          <MetricCard label="Failed" value={totals?.failedTasks ?? 0} />
+          <MetricCard label="Pass Rate" value={totals ? `${(totals.passRate * 100).toFixed(0)}%` : "--"} accent />
+          <MetricCard label="Avg Score" value={totals ? totals.averageScore.toFixed(1) : "--"} />
         </div>
-      </section>
 
-      <section className="space-y-3">
-        <h2 className="text-lg font-medium">Tasks</h2>
-        {detail.tasks.length === 0 ? (
-          <p className="text-sm text-zinc-400">Tasks are still being generated.</p>
-        ) : (
-          <ul className="space-y-2">
-            {detail.tasks.map((task) => {
-              const execution = detail.taskExecutions.find((item) => item.taskId === task.taskId);
-
-              return (
-                <li
-                  key={task.taskId}
-                  className="rounded-lg border border-zinc-800 p-4"
-                  onClick={() => setSelectedTaskId(task.taskId)}
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <p className="text-sm font-medium">{task.name}</p>
-                    <span className="text-xs uppercase text-zinc-400">{task.status}</span>
-                  </div>
-                  <p className="mt-1 text-xs text-zinc-500">{task.description}</p>
-                  {execution ? (
-                    <p className="mt-1 text-xs text-zinc-500">
-                      Worker #{execution.workerId ?? "-"} | Steps {execution.stepCount} | Tokens {execution.tokensInTotal + execution.tokensOutTotal} | Stop {execution.stopReason ?? "-"}
-                    </p>
-                  ) : null}
-                  {task.evaluation ? (
-                    <div className="mt-2 space-y-1 text-xs text-zinc-300">
-                      <p>
-                        Avg score: {task.evaluation.criterionScores.average.toFixed(1)} | Pass: {" "}
-                        {task.evaluation.pass ? "yes" : "no"}
-                      </p>
-                      <p className="text-zinc-400">{task.evaluation.rationale}</p>
-                      {task.evaluation.passBlocked ? (
-                        <p className="text-amber-300">Pass blocked by deterministic checks</p>
-                      ) : null}
-                      {task.evaluation.failureClass ? (
-                        <p className="text-amber-300">Failure: {task.evaluation.failureClass}</p>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </section>
-
-      <section className="space-y-3">
-        <h2 className="text-lg font-medium">Selected Task Trace</h2>
-        <div className="max-h-80 overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-950/40 p-3">
-          {selectedTaskSteps.length === 0 ? (
-            <p className="text-xs text-zinc-500">No step trace yet.</p>
-          ) : (
-            <ul className="space-y-2">
-              {selectedTaskSteps.map((step) => (
-                <li key={step.id} className="rounded border border-zinc-800 p-2 text-xs">
-                  <p className="font-medium uppercase text-zinc-300">
-                    Step {step.stepIndex} · {step.phase}
+        {/* Main Grid */}
+        <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 16, alignItems: "start" }}>
+          {/* LEFT COLUMN */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            {/* Tasks Panel */}
+            <Card>
+              <MonoLabel>Tasks</MonoLabel>
+              <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 2 }}>
+                {detail.tasks.map((task) => {
+                  const isSelected = task.taskId === selectedTaskId;
+                  return (
+                    <button
+                      key={task.taskId}
+                      type="button"
+                      onClick={() => setSelectedTaskId(isSelected ? null : task.taskId)}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 10,
+                        width: "100%",
+                        padding: "8px 12px",
+                        background: isSelected ? "var(--surface-3)" : "transparent",
+                        border: isSelected ? "1px solid var(--border-accent)" : "1px solid transparent",
+                        borderRadius: "var(--radius)",
+                        cursor: "pointer",
+                        textAlign: "left",
+                        transition: "background 0.1s",
+                      }}
+                    >
+                      <StatusDot status={task.status} size={6} />
+                      <span style={{ flex: 1, fontSize: 13, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {task.name}
+                      </span>
+                      <Badge>{task.category}</Badge>
+                      <Badge>{task.difficulty}</Badge>
+                      {task.evaluation && (
+                        <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: task.evaluation.pass ? "var(--status-pass)" : "var(--status-fail)" }}>
+                          {task.evaluation.criterionScores.average.toFixed(1)}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+                {detail.tasks.length === 0 && (
+                  <p style={{ fontSize: 13, color: "var(--text-muted)", padding: "8px 0" }}>
+                    No tasks generated yet.
                   </p>
-                  <p className="text-zinc-500">Execution #{step.taskExecutionId}</p>
-                  {step.usage ? (
-                    <p className="text-zinc-500">
-                      Tokens: {(step.usage.inputTokens ?? 0) + (step.usage.outputTokens ?? 0)} | Cost: ${(step.usage.costEstimateUsd ?? 0).toFixed(5)}
-                    </p>
-                  ) : null}
-                  {step.citations.length > 0 ? (
-                    <p className="text-zinc-500">
-                      Citations: {step.citations.map((citation) => citation.source).join(", ")}
-                    </p>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      </section>
+                )}
+              </div>
+            </Card>
 
-      <section className="space-y-3">
-        <h2 className="text-lg font-medium">Event Stream</h2>
-        <div className="max-h-72 overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-950/40 p-3">
-          {events.length === 0 ? (
-            <p className="text-xs text-zinc-500">No events yet.</p>
-          ) : (
-            <ul className="space-y-1">
-              {events.map((event) => (
-                <li key={event.id} className="text-xs text-zinc-300">
-                  [{event.eventType}] {event.payload?.message ?? ""}
-                </li>
+            {/* Selected Task Detail */}
+            {selectedTask && (
+              <Card variant="elevated">
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+                    <StatusDot status={selectedTask.status} size={8} />
+                    <span style={{ fontSize: 16, fontWeight: 600, color: "var(--text-primary)" }}>
+                      {selectedTask.name}
+                    </span>
+                  </div>
+                  <p style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.5 }}>
+                    {selectedTask.description}
+                  </p>
+                  {selectedTask.expectedSignals.length > 0 && (
+                    <div style={{ marginTop: 8, display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      <MonoLabel>Expected:</MonoLabel>
+                      {selectedTask.expectedSignals.map((signal) => (
+                        <Badge key={signal}>{signal}</Badge>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {selectedTask.evaluation && (
+                  <>
+                    <div style={{ marginBottom: 16 }}>
+                      <MonoLabel>Evaluation Scores</MonoLabel>
+                      <div style={{ marginTop: 8 }}>
+                        <ScoreBar label="Completeness" score={selectedTask.evaluation.criterionScores.completeness} />
+                        <ScoreBar label="Correctness" score={selectedTask.evaluation.criterionScores.correctness} />
+                        <ScoreBar label="Groundedness" score={selectedTask.evaluation.criterionScores.groundedness} />
+                        <ScoreBar label="Actionability" score={selectedTask.evaluation.criterionScores.actionability} />
+                        <ScoreBar label="Average" score={selectedTask.evaluation.criterionScores.average} />
+                      </div>
+                    </div>
+
+                    {selectedTask.evaluation.failureClass && (
+                      <div style={{ marginBottom: 12 }}>
+                        <MonoLabel>Failure Class</MonoLabel>
+                        <div style={{ marginTop: 4 }}>
+                          <Badge color="var(--status-fail)">{selectedTask.evaluation.failureClass}</Badge>
+                        </div>
+                      </div>
+                    )}
+
+                    <div style={{ marginBottom: 12 }}>
+                      <MonoLabel>Rationale</MonoLabel>
+                      <p style={{ marginTop: 4, fontSize: 12, color: "var(--text-secondary)", lineHeight: 1.6 }}>
+                        {selectedTask.evaluation.rationale}
+                      </p>
+                    </div>
+                  </>
+                )}
+
+                {selectedExecution && (
+                  <div>
+                    <MonoLabel>Execution</MonoLabel>
+                    <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
+                      <div>
+                        <MonoLabel>Steps</MonoLabel>
+                        <p style={{ fontSize: 14, fontWeight: 600, color: "var(--text-primary)", marginTop: 2 }}>
+                          {selectedExecution.stepCount}
+                        </p>
+                      </div>
+                      <div>
+                        <MonoLabel>Tokens</MonoLabel>
+                        <p style={{ fontSize: 14, fontWeight: 600, color: "var(--text-primary)", marginTop: 2 }}>
+                          {(selectedExecution.tokensInTotal + selectedExecution.tokensOutTotal).toLocaleString()}
+                        </p>
+                      </div>
+                      <div>
+                        <MonoLabel>Cost</MonoLabel>
+                        <p style={{ fontSize: 14, fontWeight: 600, color: "var(--text-primary)", marginTop: 2 }}>
+                          {formatCost(selectedExecution.costEstimateTotal)}
+                        </p>
+                      </div>
+                      <div>
+                        <MonoLabel>Stop Reason</MonoLabel>
+                        <p style={{ fontSize: 12, fontFamily: "var(--font-mono)", color: "var(--text-secondary)", marginTop: 2 }}>
+                          {selectedExecution.stopReason ?? "--"}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </Card>
+            )}
+
+            {/* Agent Trace Panel */}
+            {selectedTask && selectedSteps.length > 0 && (
+              <Card>
+                <MonoLabel>Agent Trace</MonoLabel>
+                <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 4 }}>
+                  {selectedSteps.map((step) => (
+                    <StepRow key={step.id} step={step} />
+                  ))}
+                </div>
+              </Card>
+            )}
+
+            {/* Optimization Panel */}
+            {detail.optimization.status !== "not_started" && (
+              <Card>
+                <MonoLabel>Optimization</MonoLabel>
+                <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+                  <MetricCard
+                    label="Baseline"
+                    value={detail.optimization.baselineTotals ? `${(detail.optimization.baselineTotals.passRate * 100).toFixed(0)}%` : "--"}
+                  />
+                  <MetricCard
+                    label="Optimized"
+                    value={detail.optimization.optimizedTotals ? `${(detail.optimization.optimizedTotals.passRate * 100).toFixed(0)}%` : "--"}
+                    accent
+                  />
+                  <MetricCard
+                    label="Delta"
+                    value={detail.optimization.delta ? `${detail.optimization.delta.passRateDelta > 0 ? "+" : ""}${(detail.optimization.delta.passRateDelta * 100).toFixed(1)}%` : "--"}
+                    accent={!!detail.optimization.delta && detail.optimization.delta.passRateDelta > 0}
+                  />
+                </div>
+
+                {detail.optimization.taskComparisons.length > 0 && (
+                  <div style={{ marginTop: 16 }}>
+                    <MonoLabel>Task Comparison</MonoLabel>
+                    <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 2 }}>
+                      {detail.optimization.taskComparisons.map((tc) => {
+                        const task = detail.tasks.find((t) => t.taskId === tc.taskId);
+                        return (
+                          <div
+                            key={tc.taskId}
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 12,
+                              padding: "6px 0",
+                              fontSize: 12,
+                              borderBottom: "1px solid var(--border-default)",
+                            }}
+                          >
+                            <span style={{ flex: 1, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {task?.name ?? tc.taskId}
+                            </span>
+                            <span style={{ fontFamily: "var(--font-mono)", color: tc.baselinePass === true ? "var(--status-pass)" : tc.baselinePass === false ? "var(--status-fail)" : "var(--text-muted)" }}>
+                              {tc.baselinePass === true ? "PASS" : tc.baselinePass === false ? "FAIL" : "--"}
+                            </span>
+                            <span style={{ color: "var(--text-muted)" }}>&rarr;</span>
+                            <span style={{ fontFamily: "var(--font-mono)", color: tc.optimizedPass === true ? "var(--status-pass)" : tc.optimizedPass === false ? "var(--status-fail)" : "var(--text-muted)" }}>
+                              {tc.optimizedPass === true ? "PASS" : tc.optimizedPass === false ? "FAIL" : "--"}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {detail.optimization.optimizationNotes.length > 0 && (
+                  <div style={{ marginTop: 16 }}>
+                    <MonoLabel>Notes</MonoLabel>
+                    <ul style={{ marginTop: 6, paddingLeft: 16, fontSize: 12, color: "var(--text-secondary)", lineHeight: 1.6 }}>
+                      {detail.optimization.optimizationNotes.map((note, i) => (
+                        <li key={i}>{note}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </Card>
+            )}
+          </div>
+
+          {/* RIGHT COLUMN */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            {/* Workers Panel */}
+            <Card>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <MonoLabel>Workers</MonoLabel>
+                <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-muted)" }}>
+                  {detail.workers.filter((w) => w.status === "running").length} active
+                </span>
+              </div>
+              <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+                {detail.workers.map((worker) => (
+                  <div key={worker.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0" }}>
+                    <StatusDot status={worker.status} size={6} />
+                    <span style={{ fontSize: 12, color: "var(--text-primary)" }}>{worker.workerLabel}</span>
+                    <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-muted)", marginLeft: "auto" }}>
+                      {worker.modelName}
+                    </span>
+                  </div>
+                ))}
+                {detail.workers.length === 0 && (
+                  <p style={{ fontSize: 12, color: "var(--text-muted)" }}>No workers yet.</p>
+                )}
+              </div>
+            </Card>
+
+            {/* Failure Breakdown */}
+            {failureBreakdown.length > 0 && (
+              <Card>
+                <MonoLabel>Failure Breakdown</MonoLabel>
+                <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+                  {failureBreakdown.map(([cls, count]) => (
+                    <div key={cls} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-secondary)", textTransform: "uppercase" }}>
+                        {cls.replace(/_/g, " ")}
+                      </span>
+                      <span style={{ fontFamily: "var(--font-mono)", fontSize: 14, fontWeight: 600, color: "var(--status-fail)" }}>
+                        {count}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </Card>
+            )}
+
+            {/* Event Log */}
+            <Card>
+              <MonoLabel>Event Log</MonoLabel>
+              <div
+                ref={eventLogRef}
+                style={{
+                  marginTop: 10,
+                  maxHeight: 340,
+                  overflowY: "auto",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 2,
+                }}
+              >
+                {events.map((ev) => (
+                  <div
+                    key={ev.id}
+                    style={{
+                      display: "flex",
+                      gap: 8,
+                      padding: "3px 0",
+                      fontSize: 11,
+                      fontFamily: "var(--font-mono)",
+                      lineHeight: 1.4,
+                    }}
+                  >
+                    <span style={{ color: "var(--text-muted)", flexShrink: 0 }}>
+                      {formatTimestamp(ev.createdAt)}
+                    </span>
+                    <span style={{ color: "var(--accent)", flexShrink: 0 }}>
+                      {ev.eventType.split(".").pop()}
+                    </span>
+                    <span style={{ color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {ev.payload.message}
+                    </span>
+                  </div>
+                ))}
+                {events.length === 0 && (
+                  <p style={{ fontSize: 11, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
+                    Waiting for events...
+                  </p>
+                )}
+              </div>
+            </Card>
+
+            {/* Config Panel */}
+            <Card>
+              <MonoLabel>Config</MonoLabel>
+              <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+                <ConfigRow label="Run Model" value={detail.run.config.runModel.model} />
+                <ConfigRow label="Judge Model" value={detail.run.config.judgeModel.model} />
+                <ConfigRow label="Budget" value={formatCost(detail.run.config.budget.hardCostCapUsd)} />
+                <ConfigRow label="Concurrency" value={String(detail.run.config.executionConcurrency)} />
+                <ConfigRow label="Max Steps" value={String(detail.run.config.budget.maxStepsPerTask)} />
+              </div>
+            </Card>
+          </div>
+        </div>
+      </div>
+    </main>
+  );
+}
+
+/* ─── Sub-components ──────────────────────────────────────── */
+
+function ConfigRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <MonoLabel>{label}</MonoLabel>
+      <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-primary)" }}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
+function StepRow({ step }: { step: StepTraceView }) {
+  const [expanded, setExpanded] = useState(false);
+  const usage = step.usage as { inputTokens?: number; outputTokens?: number } | null;
+  const phaseTag = step.phase.toUpperCase();
+
+  return (
+    <div style={{ borderBottom: "1px solid var(--border-default)", padding: "6px 0" }}>
+      <button
+        type="button"
+        onClick={() => setExpanded(!expanded)}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          width: "100%",
+          background: "none",
+          border: "none",
+          cursor: "pointer",
+          textAlign: "left",
+          padding: 0,
+        }}
+      >
+        <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-muted)", width: 20, textAlign: "right", flexShrink: 0 }}>
+          {step.stepIndex}
+        </span>
+        <Badge color={phaseTag === "ACT" ? "var(--accent)" : phaseTag === "PLAN" ? "var(--status-running)" : undefined}>
+          {phaseTag}
+        </Badge>
+        {usage && (
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-muted)" }}>
+            {((usage.inputTokens ?? 0) + (usage.outputTokens ?? 0)).toLocaleString()} tok
+          </span>
+        )}
+        {step.citations.length > 0 && (
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--accent)" }}>
+            {step.citations.length} cite{step.citations.length !== 1 ? "s" : ""}
+          </span>
+        )}
+        <span
+          style={{
+            marginLeft: "auto",
+            fontSize: 10,
+            color: "var(--text-muted)",
+            transform: expanded ? "rotate(90deg)" : "rotate(0deg)",
+            transition: "transform 0.15s",
+          }}
+        >
+          &#9654;
+        </span>
+      </button>
+      {expanded && (
+        <div
+          style={{
+            marginTop: 8,
+            marginLeft: 30,
+            padding: "8px 12px",
+            background: "var(--surface-2)",
+            borderRadius: "var(--radius)",
+            fontSize: 11,
+            fontFamily: "var(--font-mono)",
+            color: "var(--text-secondary)",
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+            maxHeight: 300,
+            overflowY: "auto",
+          }}
+        >
+          <div style={{ marginBottom: 8 }}>
+            <span style={{ color: "var(--text-muted)" }}>INPUT: </span>
+            {JSON.stringify(step.input, null, 2)}
+          </div>
+          <div>
+            <span style={{ color: "var(--text-muted)" }}>OUTPUT: </span>
+            {JSON.stringify(step.output, null, 2)}
+          </div>
+          {step.citations.length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <span style={{ color: "var(--accent)" }}>CITATIONS:</span>
+              {step.citations.map((c, i) => (
+                <div key={i} style={{ marginTop: 4 }}>
+                  <span style={{ color: "var(--text-muted)" }}>[{c.source}]</span> {c.excerpt}
+                </div>
               ))}
-            </ul>
+            </div>
           )}
         </div>
-      </section>
-    </main>
+      )}
+    </div>
   );
 }

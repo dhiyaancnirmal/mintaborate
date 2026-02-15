@@ -2,6 +2,17 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import {
+  StatusDot,
+  MonoLabel,
+  Card,
+  MetricCard,
+  Button,
+  Input,
+  Select,
+  Collapsible,
+} from "@/components/ui/primitives";
+import { isActiveStatus } from "@/lib/ui/format";
 
 type RunSummary = {
   id: string;
@@ -77,11 +88,16 @@ export default function HomeClient() {
     void loadRuns();
   }, [loadRuns]);
 
-  const runHint = useMemo(
-    () =>
-      "Configure workers and tasks, then inspect live multi-step traces for each task execution.",
-    [],
-  );
+  const runStats = useMemo(() => {
+    const completed = runs.filter((run) => run.status === "completed").length;
+    const running = runs.filter((run) => isActiveStatus(run.status)).length;
+
+    return {
+      total: runs.length,
+      completed,
+      running,
+    };
+  }, [runs]);
 
   function updateAssignment(index: number, patch: Partial<AssignmentRow>) {
     setAssignments((prev) => {
@@ -155,224 +171,455 @@ export default function HomeClient() {
   }
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-5xl flex-col gap-8 px-6 py-10">
-      <header className="space-y-2">
-        <h1 className="text-3xl font-semibold">Mintaborate</h1>
-        <p className="text-sm text-zinc-400">{runHint}</p>
+    <main style={{ minHeight: "100vh" }}>
+      {/* Header Bar */}
+      <header
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          height: 48,
+          padding: "0 24px",
+          borderBottom: "1px solid var(--border-default)",
+          background: "var(--surface-0)",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span
+            style={{
+              display: "inline-block",
+              width: 6,
+              height: 6,
+              borderRadius: "50%",
+              background: "var(--accent)",
+            }}
+          />
+          <span
+            style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: 13,
+              fontWeight: 600,
+              textTransform: "uppercase",
+              letterSpacing: "0.1em",
+              color: "var(--text-primary)",
+            }}
+          >
+            Mintaborate
+          </span>
+        </div>
+        <a
+          href="https://mintlify.com"
+          target="_blank"
+          rel="noreferrer"
+          style={{
+            fontFamily: "var(--font-mono)",
+            fontSize: 11,
+            fontWeight: 500,
+            textTransform: "uppercase",
+            letterSpacing: "0.06em",
+            color: "var(--text-secondary)",
+            textDecoration: "none",
+            padding: "6px 12px",
+            border: "1px solid var(--border-emphasis)",
+            borderRadius: "var(--radius)",
+            transition: "color 0.15s",
+          }}
+        >
+          Mintlify
+        </a>
       </header>
 
-      <section className="rounded-xl border border-zinc-800 bg-zinc-950/50 p-5">
-        <form className="space-y-6" onSubmit={onSubmit}>
-          <div className="grid gap-4 md:grid-cols-2">
-            <div className="space-y-1 md:col-span-2">
-              <label className="block text-sm font-medium" htmlFor="docsUrl">
-                Docs URL
-              </label>
-              <input
-                id="docsUrl"
+      {/* Hero Section */}
+      <section
+        style={{
+          textAlign: "center",
+          padding: "56px 24px 32px",
+          maxWidth: 720,
+          margin: "0 auto",
+        }}
+      >
+        <MonoLabel>Agent Effectiveness Simulation</MonoLabel>
+        <h1
+          style={{
+            marginTop: 12,
+            fontSize: 40,
+            fontWeight: 600,
+            lineHeight: 1.15,
+            color: "var(--text-primary)",
+          }}
+        >
+          Measure the{" "}
+          <span style={{ color: "var(--accent)", fontStyle: "italic" }}>
+            implementation outcome
+          </span>
+        </h1>
+        <p
+          style={{
+            marginTop: 12,
+            fontSize: 14,
+            color: "var(--text-secondary)",
+            lineHeight: 1.6,
+          }}
+        >
+          Simulate real implementation workflows, inspect where traces fail,
+          and get diagnostics-first evaluation.
+        </p>
+      </section>
+
+      {/* Config Form */}
+      <section style={{ maxWidth: 760, margin: "0 auto", padding: "0 24px" }}>
+        <Card variant="elevated">
+          <form onSubmit={onSubmit}>
+            {/* Row 1: URL + Submit */}
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr auto",
+                gap: 12,
+                alignItems: "end",
+              }}
+            >
+              <Input
+                label="Docs URL"
                 required
-                className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
                 value={docsUrl}
                 onChange={(e) => setDocsUrl(e.target.value)}
                 placeholder="https://docs.example.com"
               />
+              <Button
+                type="submit"
+                variant="primary"
+                disabled={creating}
+                style={{
+                  height: 42,
+                  whiteSpace: "nowrap",
+                  opacity: creating ? 0.6 : 1,
+                }}
+              >
+                {creating ? "Creating..." : "Start Simulation"}
+              </Button>
             </div>
 
-            <div className="space-y-1">
-              <label className="block text-sm font-medium" htmlFor="taskCount">
-                Task Count
-              </label>
-              <input
-                id="taskCount"
+            {/* Row 2: Number inputs */}
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr 1fr",
+                gap: 12,
+                marginTop: 16,
+              }}
+            >
+              <Input
+                label="Task Count"
                 type="number"
                 min={1}
                 max={100}
-                className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
                 value={taskCount}
                 onChange={(e) => setTaskCount(Number(e.target.value))}
               />
-            </div>
-
-            <div className="space-y-1">
-              <label className="block text-sm font-medium" htmlFor="workerCount">
-                Worker Count
-              </label>
-              <input
-                id="workerCount"
+              <Input
+                label="Workers"
                 type="number"
                 min={1}
                 max={12}
-                className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
                 value={workerCount}
                 onChange={(e) => setWorkerCount(Number(e.target.value))}
               />
-            </div>
-
-            <div className="space-y-1">
-              <label className="block text-sm font-medium" htmlFor="maxStepsPerTask">
-                Max Steps Per Task
-              </label>
-              <input
-                id="maxStepsPerTask"
+              <Input
+                label="Max Steps"
                 type="number"
                 min={1}
                 max={64}
-                className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
                 value={maxStepsPerTask}
                 onChange={(e) => setMaxStepsPerTask(Number(e.target.value))}
               />
             </div>
-          </div>
 
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <h2 className="text-sm font-medium">Worker Model Assignments</h2>
-              <button
-                type="button"
-                className="rounded border border-zinc-700 px-2 py-1 text-xs"
-                onClick={() =>
-                  setAssignments((prev) => [
-                    ...prev,
-                    { provider: "openai", model: "gpt-5-mini", quantity: 1 },
-                  ])
-                }
-              >
-                Add Assignment
-              </button>
-            </div>
-            <div className="space-y-2">
-              {assignments.map((assignment, index) => (
-                <div key={`${assignment.model}-${index}`} className="grid gap-2 md:grid-cols-4">
-                  <select
-                    className="rounded border border-zinc-700 bg-zinc-900 px-2 py-2 text-xs"
-                    value={assignment.provider}
-                    onChange={(e) =>
-                      updateAssignment(index, {
-                        provider: e.target.value as AssignmentRow["provider"],
-                      })
+            {/* Worker Model Assignments */}
+            <div style={{ marginTop: 16 }}>
+              <Collapsible title="Worker Model Assignments" defaultOpen>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {assignments.map((assignment, index) => (
+                    <div
+                      key={`${assignment.model}-${index}`}
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "140px 1fr 80px auto",
+                        gap: 8,
+                        alignItems: "end",
+                      }}
+                    >
+                      <Select
+                        value={assignment.provider}
+                        onChange={(e) =>
+                          updateAssignment(index, {
+                            provider: e.target.value as AssignmentRow["provider"],
+                          })
+                        }
+                      >
+                        <option value="openai">openai</option>
+                        <option value="anthropic">anthropic</option>
+                        <option value="openai-compatible">openai-compatible</option>
+                      </Select>
+                      <input
+                        style={{
+                          padding: "10px 12px",
+                          background: "var(--surface-3)",
+                          border: "1px solid var(--border-default)",
+                          borderRadius: "var(--radius)",
+                          color: "var(--text-primary)",
+                          fontSize: 13,
+                          fontFamily: "var(--font-mono)",
+                          outline: "none",
+                        }}
+                        value={assignment.model}
+                        onChange={(e) => updateAssignment(index, { model: e.target.value })}
+                        placeholder="model name"
+                      />
+                      <input
+                        type="number"
+                        min={1}
+                        max={12}
+                        style={{
+                          padding: "10px 12px",
+                          background: "var(--surface-3)",
+                          border: "1px solid var(--border-default)",
+                          borderRadius: "var(--radius)",
+                          color: "var(--text-primary)",
+                          fontSize: 13,
+                          outline: "none",
+                        }}
+                        value={assignment.quantity}
+                        onChange={(e) => updateAssignment(index, { quantity: Number(e.target.value) })}
+                      />
+                      <Button
+                        type="button"
+                        variant="danger"
+                        style={{ padding: "8px 10px", fontSize: 11 }}
+                        onClick={() =>
+                          setAssignments((prev) => prev.filter((_, i) => i !== index))
+                        }
+                        disabled={assignments.length <= 1}
+                      >
+                        Remove
+                      </Button>
+                    </div>
+                  ))}
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    style={{ alignSelf: "flex-start", marginTop: 4 }}
+                    onClick={() =>
+                      setAssignments((prev) => [
+                        ...prev,
+                        { provider: "openai", model: "gpt-5-mini", quantity: 1 },
+                      ])
                     }
                   >
-                    <option value="openai">openai</option>
-                    <option value="anthropic">anthropic</option>
-                    <option value="openai-compatible">openai-compatible</option>
-                  </select>
-                  <input
-                    className="rounded border border-zinc-700 bg-zinc-900 px-2 py-2 text-xs md:col-span-2"
-                    value={assignment.model}
-                    onChange={(e) => updateAssignment(index, { model: e.target.value })}
-                    placeholder="model name"
-                  />
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="number"
-                      min={1}
-                      max={12}
-                      className="w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-2 text-xs"
-                      value={assignment.quantity}
-                      onChange={(e) => updateAssignment(index, { quantity: Number(e.target.value) })}
-                    />
-                    <button
-                      type="button"
-                      className="rounded border border-zinc-700 px-2 py-1 text-xs"
-                      onClick={() =>
-                        setAssignments((prev) => prev.filter((_, itemIndex) => itemIndex !== index))
-                      }
-                      disabled={assignments.length <= 1}
+                    + Add Assignment
+                  </Button>
+                </div>
+              </Collapsible>
+            </div>
+
+            {/* User-Defined Tasks */}
+            <div style={{ marginTop: 12 }}>
+              <Collapsible title="User-Defined Tasks">
+                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  {taskRows.map((task, index) => (
+                    <div
+                      key={`${task.name}-${index}`}
+                      style={{
+                        padding: 12,
+                        border: "1px solid var(--border-default)",
+                        borderRadius: "var(--radius)",
+                        background: "var(--surface-2)",
+                      }}
                     >
-                      Remove
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <h2 className="text-sm font-medium">User-Defined Tasks</h2>
-              <button
-                type="button"
-                className="rounded border border-zinc-700 px-2 py-1 text-xs"
-                onClick={() =>
-                  setTaskRows((prev) => [
-                    ...prev,
-                    {
-                      name: "",
-                      description: "",
-                      expectedSignals: "",
-                    },
-                  ])
-                }
-              >
-                Add Task
-              </button>
-            </div>
-            <div className="space-y-3">
-              {taskRows.map((task, index) => (
-                <div key={`${task.name}-${index}`} className="rounded-lg border border-zinc-800 p-3 space-y-2">
-                  <input
-                    className="w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-2 text-xs"
-                    value={task.name}
-                    onChange={(e) => updateTask(index, { name: e.target.value })}
-                    placeholder="Task name"
-                  />
-                  <textarea
-                    className="w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-2 text-xs"
-                    value={task.description}
-                    onChange={(e) => updateTask(index, { description: e.target.value })}
-                    rows={2}
-                    placeholder="Task description"
-                  />
-                  <input
-                    className="w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-2 text-xs"
-                    value={task.expectedSignals}
-                    onChange={(e) => updateTask(index, { expectedSignals: e.target.value })}
-                    placeholder="Expected signals (comma separated)"
-                  />
-                  <button
+                      <input
+                        style={{
+                          display: "block",
+                          width: "100%",
+                          padding: "8px 10px",
+                          marginBottom: 8,
+                          background: "var(--surface-3)",
+                          border: "1px solid var(--border-default)",
+                          borderRadius: "var(--radius)",
+                          color: "var(--text-primary)",
+                          fontSize: 12,
+                          outline: "none",
+                        }}
+                        value={task.name}
+                        onChange={(e) => updateTask(index, { name: e.target.value })}
+                        placeholder="Task name"
+                      />
+                      <textarea
+                        style={{
+                          display: "block",
+                          width: "100%",
+                          padding: "8px 10px",
+                          marginBottom: 8,
+                          background: "var(--surface-3)",
+                          border: "1px solid var(--border-default)",
+                          borderRadius: "var(--radius)",
+                          color: "var(--text-primary)",
+                          fontSize: 12,
+                          outline: "none",
+                          resize: "vertical",
+                          fontFamily: "inherit",
+                        }}
+                        value={task.description}
+                        onChange={(e) => updateTask(index, { description: e.target.value })}
+                        rows={2}
+                        placeholder="Task description"
+                      />
+                      <input
+                        style={{
+                          display: "block",
+                          width: "100%",
+                          padding: "8px 10px",
+                          marginBottom: 8,
+                          background: "var(--surface-3)",
+                          border: "1px solid var(--border-default)",
+                          borderRadius: "var(--radius)",
+                          color: "var(--text-primary)",
+                          fontSize: 12,
+                          outline: "none",
+                        }}
+                        value={task.expectedSignals}
+                        onChange={(e) => updateTask(index, { expectedSignals: e.target.value })}
+                        placeholder="Expected signals (comma separated)"
+                      />
+                      <Button
+                        type="button"
+                        variant="danger"
+                        style={{ fontSize: 11, padding: "6px 10px" }}
+                        onClick={() =>
+                          setTaskRows((prev) => prev.filter((_, i) => i !== index))
+                        }
+                        disabled={taskRows.length <= 1}
+                      >
+                        Remove Task
+                      </Button>
+                    </div>
+                  ))}
+                  <Button
                     type="button"
-                    className="rounded border border-zinc-700 px-2 py-1 text-xs"
-                    onClick={() => setTaskRows((prev) => prev.filter((_, taskIndex) => taskIndex !== index))}
-                    disabled={taskRows.length <= 1}
+                    variant="secondary"
+                    style={{ alignSelf: "flex-start" }}
+                    onClick={() =>
+                      setTaskRows((prev) => [
+                        ...prev,
+                        { name: "", description: "", expectedSignals: "" },
+                      ])
+                    }
                   >
-                    Remove Task
-                  </button>
+                    + Add Task
+                  </Button>
                 </div>
-              ))}
+              </Collapsible>
             </div>
-          </div>
 
-          <button
-            type="submit"
-            disabled={creating}
-            className="rounded-md bg-[#24E07E] px-4 py-2 text-sm font-medium text-black disabled:opacity-60"
-          >
-            {creating ? "Creating..." : "Start Run"}
-          </button>
-
-          {error ? <p className="text-sm text-red-400">{error}</p> : null}
-        </form>
+            {error && (
+              <p
+                style={{
+                  marginTop: 12,
+                  fontSize: 13,
+                  color: "var(--status-fail)",
+                  fontFamily: "var(--font-mono)",
+                }}
+              >
+                {error}
+              </p>
+            )}
+          </form>
+        </Card>
       </section>
 
-      <section className="space-y-3">
-        <h2 className="text-lg font-medium">Recent Runs</h2>
-        {runs.length === 0 ? (
-          <p className="text-sm text-zinc-400">No runs yet.</p>
-        ) : (
-          <ul className="space-y-2">
-            {runs.map((run) => (
-              <li key={run.id} className="rounded-lg border border-zinc-800 p-3">
-                <div className="flex items-center justify-between gap-2">
-                  <a href={`/runs/${run.id}`} className="text-sm font-medium">
+      {/* Bottom Grid */}
+      <section
+        style={{
+          maxWidth: 760,
+          margin: "24px auto 48px",
+          padding: "0 24px",
+          display: "grid",
+          gridTemplateColumns: "1.5fr 1fr",
+          gap: 16,
+        }}
+      >
+        {/* Recent Runs */}
+        <Card>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              marginBottom: 12,
+            }}
+          >
+            <MonoLabel>Recent Runs</MonoLabel>
+            <span
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: 11,
+                color: "var(--text-muted)",
+              }}
+            >
+              {runStats.total} total
+            </span>
+          </div>
+
+          {runs.length === 0 ? (
+            <p style={{ fontSize: 13, color: "var(--text-muted)" }}>No runs yet.</p>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              {runs.map((run) => (
+                <a
+                  key={run.id}
+                  href={`/runs/${run.id}`}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    padding: "8px 12px",
+                    textDecoration: "none",
+                    borderRadius: "var(--radius)",
+                    border: "1px solid var(--border-default)",
+                    transition: "border-color 0.15s",
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.borderColor = "var(--border-emphasis)";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.borderColor = "var(--border-default)";
+                  }}
+                >
+                  <StatusDot status={run.status} size={6} />
+                  <span
+                    style={{
+                      flex: 1,
+                      fontFamily: "var(--font-mono)",
+                      fontSize: 12,
+                      color: "var(--text-primary)",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
                     {run.docsUrl}
-                  </a>
-                  <span className="text-xs uppercase text-zinc-400">{run.status}</span>
-                </div>
-                <p className="mt-1 text-xs text-zinc-500">Run ID: {run.id}</p>
-              </li>
-            ))}
-          </ul>
-        )}
+                  </span>
+                  <MonoLabel>{run.status}</MonoLabel>
+                </a>
+              ))}
+            </div>
+          )}
+        </Card>
+
+        {/* Run Monitor */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <MetricCard label="Running" value={runStats.running} />
+          <MetricCard label="Completed" value={runStats.completed} accent />
+        </div>
       </section>
     </main>
   );
