@@ -63,6 +63,10 @@ export function evaluateDeterministicGuards(input: {
   attempt: AgentTaskAttempt;
   stepCount: number;
   stopReason: string;
+  availableChunks: Array<{
+    sourceUrl: string;
+    snippetHash: string;
+  }>;
 }): DeterministicGuards {
   const checks: DeterministicCheck[] = [];
   const passBlockedReasons: string[] = [];
@@ -82,6 +86,47 @@ export function evaluateDeterministicGuards(input: {
   if (!citationCheckPassed) {
     guards.groundednessCap = 3;
     passBlockedReasons.push("missing_citations");
+  }
+
+  const knownChunkKeys = new Set(
+    input.availableChunks.map((chunk) => `${chunk.sourceUrl}#${chunk.snippetHash}`),
+  );
+
+  const invalidCitations = input.attempt.citations.filter((citation) => {
+    const source = citation.source.trim();
+    const snippetHash = citation.snippetHash?.trim() ?? "";
+    const excerpt = citation.excerpt.trim();
+    if (!source || source === "unknown") {
+      return true;
+    }
+    if (!snippetHash) {
+      return true;
+    }
+    if (!excerpt) {
+      return true;
+    }
+    return !knownChunkKeys.has(`${source}#${snippetHash}`);
+  });
+
+  const citationIntegrityPassed = citationCheckPassed && invalidCitations.length === 0;
+  checks.push({
+    name: "citation_integrity",
+    passed: citationIntegrityPassed,
+    scoreDelta: citationIntegrityPassed ? 0 : -2,
+    details: {
+      totalCitations: input.attempt.citations.length,
+      invalidCount: invalidCitations.length,
+      invalid: invalidCitations.slice(0, 4).map((citation) => ({
+        source: citation.source,
+        snippetHash: citation.snippetHash ?? null,
+        hasExcerpt: citation.excerpt.trim().length > 0,
+      })),
+    },
+  });
+
+  if (!citationIntegrityPassed) {
+    guards.groundednessCap = Math.min(guards.groundednessCap ?? 10, 3);
+    passBlockedReasons.push("invalid_citations");
   }
 
   const allAnswerText = `${input.attempt.answer}\n${input.attempt.steps.join("\n")}`;

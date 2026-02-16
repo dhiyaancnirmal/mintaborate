@@ -7,6 +7,9 @@ describe("aggregateRunScores", () => {
       {
         taskId: "t1",
         pass: true,
+        qualityPass: true,
+        validityPass: true,
+        validityBlockedReasons: [],
         failureClass: null,
         rationale: "good",
         confidence: 0.9,
@@ -21,6 +24,9 @@ describe("aggregateRunScores", () => {
       {
         taskId: "t2",
         pass: false,
+        qualityPass: false,
+        validityPass: false,
+        validityBlockedReasons: ["invalid_citations"],
         failureClass: "missing_content",
         rationale: "missing",
         confidence: 0.7,
@@ -37,6 +43,8 @@ describe("aggregateRunScores", () => {
     expect(aggregate.totalTasks).toBe(2);
     expect(aggregate.passedTasks).toBe(1);
     expect(aggregate.passRate).toBe(0.5);
+    expect(aggregate.qualityPassRate).toBe(0.5);
+    expect(aggregate.validityPassRate).toBe(0.5);
     expect(aggregate.failureBreakdown.missing_content).toBe(1);
   });
 });

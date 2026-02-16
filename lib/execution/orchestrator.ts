@@ -143,6 +143,7 @@ function toTaskAttempt(input: {
   tokensIn: number;
   tokensOut: number;
   cost: number;
+  latencyMs: number;
 }): AgentTaskAttempt {
   return {
     taskId: input.task.taskId,
@@ -155,7 +156,7 @@ function toTaskAttempt(input: {
       inputTokens: input.tokensIn,
       outputTokens: input.tokensOut,
     },
-    latencyMs: 0,
+    latencyMs: input.latencyMs,
     costEstimateUsd: input.cost,
   };
 }
@@ -208,6 +209,7 @@ async function executeTaskOnWorker(input: {
 
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
+  let totalLatencyMs = 0;
   let totalCost = 0;
   let finalAnswer = "";
   const stepOutputs: string[] = [];
@@ -221,9 +223,9 @@ async function executeTaskOnWorker(input: {
     costEstimateUsd: number;
     stepCountDelta?: number;
   }): Promise<void> => {
-    totalInputTokens += inputUsage.inputTokens;
-    totalOutputTokens += inputUsage.outputTokens;
-    totalCost += inputUsage.costEstimateUsd;
+      totalInputTokens += inputUsage.inputTokens;
+      totalOutputTokens += inputUsage.outputTokens;
+      totalCost += inputUsage.costEstimateUsd;
 
     await incrementRunCost(input.runId, inputUsage.costEstimateUsd);
     await updateTaskExecutionProgress({
@@ -414,6 +416,7 @@ async function executeTaskOnWorker(input: {
         outputTokens: planResult.usage.outputTokens,
         costEstimateUsd: planResult.costEstimateUsd,
       });
+      totalLatencyMs += planResult.latencyMs;
 
       if (totalInputTokens + totalOutputTokens >= maxTaskTokens) {
         stopReason = "token_limit";
@@ -462,7 +465,13 @@ async function executeTaskOnWorker(input: {
         inputTokens: actResult.usage.inputTokens,
         outputTokens: actResult.usage.outputTokens,
         costEstimateUsd: actResult.costEstimateUsd,
+        stepCountDelta: 1,
       });
+      totalLatencyMs += actResult.latencyMs;
+
+      finalAnswer = actResult.parsed.answer;
+      stepOutputs.push(actResult.parsed.stepOutput);
+      citations.push(...actResult.parsed.citations);
 
       if (totalInputTokens + totalOutputTokens >= maxTaskTokens) {
         stopReason = "token_limit";
@@ -518,13 +527,8 @@ async function executeTaskOnWorker(input: {
         inputTokens: reflectResult.usage.inputTokens,
         outputTokens: reflectResult.usage.outputTokens,
         costEstimateUsd: reflectResult.costEstimateUsd,
-        stepCountDelta: 1,
       });
-
-      finalAnswer = actResult.parsed.answer;
-      stepOutputs.push(actResult.parsed.stepOutput);
-
-      citations.push(...actResult.parsed.citations);
+      totalLatencyMs += reflectResult.latencyMs;
 
       const nextPlan = dedupe([
         ...planResult.parsed.planItems,
@@ -613,6 +617,7 @@ async function executeTaskOnWorker(input: {
       tokensIn: totalInputTokens,
       tokensOut: totalOutputTokens,
       cost: totalCost,
+      latencyMs: totalLatencyMs,
     });
 
     await persistTaskAttempt(input.runId, attempt, { includeCostUpdate: false });
@@ -622,6 +627,10 @@ async function executeTaskOnWorker(input: {
       attempt,
       stepCount: stepOutputs.length,
       stopReason,
+      availableChunks: input.chunks.map((chunk) => ({
+        sourceUrl: chunk.sourceUrl,
+        snippetHash: chunk.snippetHash,
+      })),
     });
 
     await persistDeterministicChecks({
@@ -671,6 +680,9 @@ async function executeTaskOnWorker(input: {
     const fallbackEvaluation: TaskEvaluationResult = {
       taskId: input.task.taskId,
       pass: false,
+      qualityPass: false,
+      validityPass: false,
+      validityBlockedReasons: ["execution_error"],
       failureClass: "poor_structure",
       rationale: `Execution error: ${message}`,
       confidence: 0,

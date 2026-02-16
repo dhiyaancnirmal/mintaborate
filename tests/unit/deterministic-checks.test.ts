@@ -25,6 +25,7 @@ describe("evaluateDeterministicGuards", () => {
       },
       stepCount: 1,
       stopReason: "completed",
+      availableChunks: [],
     });
 
     expect(result.passBlockedReasons).toContain("missing_citations");
@@ -48,6 +49,7 @@ describe("evaluateDeterministicGuards", () => {
         citations: [
           {
             source: "https://docs.example.com/auth",
+            snippetHash: "abc123",
             excerpt: "Use API key in Authorization header",
           },
         ],
@@ -59,6 +61,12 @@ describe("evaluateDeterministicGuards", () => {
       },
       stepCount: 2,
       stopReason: "completed",
+      availableChunks: [
+        {
+          sourceUrl: "https://docs.example.com/auth",
+          snippetHash: "abc123",
+        },
+      ],
     });
 
     expect(result.passBlockedReasons.length).toBe(0);

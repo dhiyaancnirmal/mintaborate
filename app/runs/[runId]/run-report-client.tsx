@@ -33,6 +33,9 @@ interface CriterionScores {
 interface TaskEvaluation {
   taskId: string;
   pass: boolean;
+  qualityPass: boolean;
+  validityPass: boolean;
+  validityBlockedReasons: string[];
   failureClass: string | null;
   rationale: string;
   confidence: number;
@@ -92,6 +95,10 @@ interface RunAggregateScore {
   passedTasks: number;
   failedTasks: number;
   passRate: number;
+  qualityPassedTasks: number;
+  qualityPassRate: number;
+  validityPassedTasks: number;
+  validityPassRate: number;
   averageScore: number;
   failureBreakdown: Record<string, number>;
 }
@@ -153,6 +160,10 @@ interface RunDetail {
       passedTasks: number;
       failedTasks: number;
       passRate: number;
+      qualityPassedTasks: number;
+      qualityPassRate: number;
+      validityPassedTasks: number;
+      validityPassRate: number;
       averageScore: number;
       failureBreakdown: Record<string, number>;
     } | null;
@@ -536,14 +547,24 @@ export default function RunReportClient({ runId }: { runId: string }) {
         </div>
 
         {/* Metrics Row */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 12, marginBottom: 24 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 12, marginBottom: 24 }}>
           <MetricCard label="Total Tasks" value={totals?.totalTasks ?? detail.tasks.length} />
           <MetricCard label="Passed" value={totals?.passedTasks ?? 0} accent={!!totals && totals.passedTasks > 0} />
           <MetricCard label="Failed" value={totals?.failedTasks ?? 0} />
           <MetricCard
-            label="Pass Rate"
+            label="Overall Pass"
             value={totals ? `${(totals.passRate * 100).toFixed(0)}%` : "--"}
             accent={!!totals && totals.passRate > 0}
+          />
+          <MetricCard
+            label="Validity Pass"
+            value={totals ? `${(totals.validityPassRate * 100).toFixed(0)}%` : "--"}
+            accent={!!totals && totals.validityPassRate > 0}
+          />
+          <MetricCard
+            label="Quality Pass"
+            value={totals ? `${(totals.qualityPassRate * 100).toFixed(0)}%` : "--"}
+            accent={!!totals && totals.qualityPassRate > 0}
           />
           <MetricCard label="Avg Score" value={totals ? totals.averageScore.toFixed(1) : "--"} />
         </div>
@@ -626,6 +647,14 @@ export default function RunReportClient({ runId }: { runId: string }) {
                   <>
                     <div style={{ marginBottom: 16 }}>
                       <MonoLabel>Evaluation Scores</MonoLabel>
+                      <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        <Badge color={selectedTask.evaluation.validityPass ? "var(--status-pass)" : "var(--status-fail)"}>
+                          validity: {selectedTask.evaluation.validityPass ? "PASS" : "FAIL"}
+                        </Badge>
+                        <Badge color={selectedTask.evaluation.qualityPass ? "var(--status-pass)" : "var(--status-fail)"}>
+                          quality: {selectedTask.evaluation.qualityPass ? "PASS" : "FAIL"}
+                        </Badge>
+                      </div>
                       <div style={{ marginTop: 8 }}>
                         <ScoreBar label="Completeness" score={selectedTask.evaluation.criterionScores.completeness} />
                         <ScoreBar label="Correctness" score={selectedTask.evaluation.criterionScores.correctness} />
@@ -650,6 +679,16 @@ export default function RunReportClient({ runId }: { runId: string }) {
                         {selectedTask.evaluation.rationale}
                       </p>
                     </div>
+                    {selectedTask.evaluation.validityBlockedReasons.length > 0 && (
+                      <div style={{ marginBottom: 12 }}>
+                        <MonoLabel>Validity Blocks</MonoLabel>
+                        <div style={{ marginTop: 4, display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          {selectedTask.evaluation.validityBlockedReasons.map((reason) => (
+                            <Badge key={reason} color="var(--status-fail)">{reason}</Badge>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </>
                 )}
 

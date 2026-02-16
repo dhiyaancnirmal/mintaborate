@@ -11,6 +11,9 @@ export interface CriterionScores {
 export interface TaskEvaluationResult {
   taskId: string;
   pass: boolean;
+  qualityPass: boolean;
+  validityPass: boolean;
+  validityBlockedReasons: string[];
   failureClass: FailureClass | null;
   rationale: string;
   confidence: number;
@@ -29,6 +32,10 @@ export interface RunAggregateScore {
   passedTasks: number;
   failedTasks: number;
   passRate: number;
+  qualityPassedTasks: number;
+  qualityPassRate: number;
+  validityPassedTasks: number;
+  validityPassRate: number;
   averageScore: number;
   failureBreakdown: Record<string, number>;
 }

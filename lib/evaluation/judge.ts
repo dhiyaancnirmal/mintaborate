@@ -216,7 +216,16 @@ export async function judgeTaskAttempt(input: {
   }
 
   const passBlocked = (input.deterministicGuards?.passBlockedReasons.length ?? 0) > 0;
-  const pass = finalScores.average >= PASS_THRESHOLD && alignment.isSupportedByEvidence && !passBlocked;
+  const qualityPass = finalScores.average >= PASS_THRESHOLD;
+  const validityBlockedReasons: string[] = [];
+  if (!alignment.isSupportedByEvidence) {
+    validityBlockedReasons.push("unsupported_by_evidence");
+  }
+  if (passBlocked) {
+    validityBlockedReasons.push(...(input.deterministicGuards?.passBlockedReasons ?? []));
+  }
+  const validityPass = validityBlockedReasons.length === 0;
+  const pass = qualityPass && validityPass;
 
   const rationale = [
     baseRubric.rationale,
@@ -240,6 +249,9 @@ export async function judgeTaskAttempt(input: {
   return {
     taskId: input.task.taskId,
     pass,
+    qualityPass,
+    validityPass,
+    validityBlockedReasons,
     failureClass,
     rationale,
     confidence: baseRubric.confidence,
