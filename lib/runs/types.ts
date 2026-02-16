@@ -21,6 +21,7 @@ export type TaskStatus =
 export type WorkerStatus = "idle" | "running" | "paused" | "done" | "error";
 
 export type TaskExecutionStatus = "pending" | "running" | "passed" | "failed" | "error" | "skipped";
+export type TaskPhase = "baseline" | "optimized";
 
 export type TaskStopReason =
   | "completed"
@@ -88,6 +89,7 @@ export interface RunConfig {
   judgeModel: ModelConfig;
   executionConcurrency: number;
   judgeConcurrency: number;
+  enableSkillOptimization: boolean;
   tieBreakEnabled: boolean;
   budget: RunBudget;
   workerConfig: WorkerConfig;
@@ -99,6 +101,7 @@ export interface CreateRunRequest {
   taskCount?: number;
   executionConcurrency?: number;
   judgeConcurrency?: number;
+  enableSkillOptimization?: boolean;
   tieBreakEnabled?: boolean;
   maxTokensPerTask?: number;
   hardCostCapUsd?: number;
@@ -151,6 +154,7 @@ export interface TaskExecutionSummary {
   id: number;
   runId: string;
   taskId: string;
+  phase: TaskPhase;
   workerId: number | null;
   status: TaskExecutionStatus;
   stepCount: number;
@@ -161,6 +165,13 @@ export interface TaskExecutionSummary {
   startedAt: number;
   endedAt: number | null;
 }
+
+export type SkillOptimizationStatus =
+  | "not_started"
+  | "running"
+  | "completed"
+  | "skipped"
+  | "error";
 
 export interface AgentMemoryState {
   currentStep: number;

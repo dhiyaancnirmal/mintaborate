@@ -339,11 +339,11 @@ export function Badge({
         color: c,
         background:
           c === "var(--status-pass)"
-            ? "rgba(37,224,135,0.1)"
+            ? "rgba(34,224,125,0.1)"
             : c === "var(--status-fail)"
               ? "rgba(239,68,68,0.1)"
               : "rgba(255,255,255,0.06)",
-        border: `1px solid ${c === "var(--status-pass)" ? "rgba(37,224,135,0.25)" : c === "var(--status-fail)" ? "rgba(239,68,68,0.25)" : "rgba(255,255,255,0.1)"}`,
+        border: `1px solid ${c === "var(--status-pass)" ? "rgba(34,224,125,0.25)" : c === "var(--status-fail)" ? "rgba(239,68,68,0.25)" : "rgba(255,255,255,0.1)"}`,
         borderRadius: "var(--radius)",
       }}
     >

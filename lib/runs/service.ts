@@ -9,6 +9,8 @@ import {
   runEvents,
   runWorkers,
   runs,
+  skillOptimizationArtifacts,
+  skillOptimizationSessions,
   taskAgentState,
   taskAttempts,
   taskEvaluations,
@@ -29,6 +31,8 @@ import type {
   RunConfig,
   RunEventPayload,
   RunStatus,
+  SkillOptimizationStatus,
+  TaskPhase,
   RunTotals,
   TaskExecutionStatus,
   TaskExecutionSummary,
@@ -83,7 +87,59 @@ export interface RunDetailResponse {
   taskExecutions: TaskExecutionSummary[];
   recentSteps: StepTraceView[];
   recentEvents: Array<{ id: number; seq: number; eventType: string; payload: RunEventPayload; createdAt: number }>;
+  runErrors: Array<{
+    id: number;
+    phase: string;
+    errorCode: string;
+    message: string;
+    details: Record<string, unknown> | null;
+    createdAt: number;
+  }>;
+  optimization: {
+    status: SkillOptimizationStatus;
+    sourceSkillOrigin: "site_skill" | "none";
+    baselineTotals: RunAggregateScore | null;
+    optimizedTotals: RunAggregateScore | null;
+    delta: {
+      passRateDelta: number;
+      averageScoreDelta: number;
+      passedTasksDelta: number;
+      failedTasksDelta: number;
+    } | null;
+    taskComparisons: Array<{
+      taskId: string;
+      baselinePass: boolean | null;
+      optimizedPass: boolean | null;
+      baselineScore: number | null;
+      optimizedScore: number | null;
+    }>;
+    optimizedSkillMarkdown: string | null;
+    optimizationNotes: string[];
+    errorMessage: string | null;
+  };
 }
+
+interface SkillOptimizationSessionRecord {
+  id: number;
+  runId: string;
+  status: SkillOptimizationStatus;
+  sourceSkillOrigin: "site_skill" | "none";
+  baselineTotals: RunAggregateScore | null;
+  optimizedTotals: RunAggregateScore | null;
+  delta: {
+    passRateDelta: number;
+    averageScoreDelta: number;
+    passedTasksDelta: number;
+    failedTasksDelta: number;
+  } | null;
+  errorMessage: string | null;
+}
+
+type SkillOptimizationArtifactType =
+  | "baseline_skill"
+  | "optimized_skill"
+  | "generation_prompt"
+  | "generation_output";
 
 function mergeModelConfig(defaultConfig: ModelConfig, patch?: Partial<ModelConfig>): ModelConfig {
   return {
@@ -189,6 +245,8 @@ export function buildRunConfig(input: CreateRunRequest): RunConfig {
     judgeModel,
     executionConcurrency: input.executionConcurrency ?? defaults.executionConcurrency,
     judgeConcurrency: input.judgeConcurrency ?? defaults.judgeConcurrency,
+    enableSkillOptimization:
+      input.enableSkillOptimization ?? defaults.enableSkillOptimization,
     tieBreakEnabled: input.tieBreakEnabled ?? defaults.tieBreakEnabled,
     budget: {
       maxTasks: input.taskCount ?? defaults.budget.maxTasks,
@@ -266,9 +324,7 @@ export async function getRun(runId: string): Promise<{
 } | null> {
   const db = await getDb();
 
-  const row = await db.query.runs.findFirst({
-    where: eq(runs.id, runId),
-  });
+  const row = (await db.select().from(runs).where(eq(runs.id, runId)).limit(1))[0];
 
   if (!row) {
     return null;
@@ -371,12 +427,14 @@ export async function createTaskExecution(input: {
   runId: string;
   taskId: string;
   workerId: number;
+  phase: TaskPhase;
 }): Promise<number> {
   const db = await getDb();
 
   const result = await db.insert(taskExecutions).values({
     runId: input.runId,
     taskId: input.taskId,
+    phase: input.phase,
     workerId: input.workerId,
     status: "running",
     stepCount: 0,
@@ -462,9 +520,13 @@ export async function upsertTaskAgentState(input: {
 export async function getTaskAgentState(taskExecutionId: number): Promise<AgentMemoryState | null> {
   const db = await getDb();
 
-  const row = await db.query.taskAgentState.findFirst({
-    where: eq(taskAgentState.taskExecutionId, taskExecutionId),
-  });
+  const row = (
+    await db
+      .select()
+      .from(taskAgentState)
+      .where(eq(taskAgentState.taskExecutionId, taskExecutionId))
+      .limit(1)
+  )[0];
 
   if (!row) {
     return null;
@@ -567,6 +629,7 @@ export async function listTaskExecutionSummaries(runId: string): Promise<TaskExe
     id: row.id,
     runId: row.runId,
     taskId: row.taskId,
+    phase: row.phase as TaskPhase,
     workerId: row.workerId ?? null,
     status: row.status as TaskExecutionStatus,
     stepCount: row.stepCount,
@@ -635,6 +698,169 @@ export async function getRecentStepTraces(runId: string, limit = 120): Promise<S
     .reverse();
 }
 
+function defaultOptimizationResponse(): RunDetailResponse["optimization"] {
+  return {
+    status: "not_started",
+    sourceSkillOrigin: "none",
+    baselineTotals: null,
+    optimizedTotals: null,
+    delta: null,
+    taskComparisons: [],
+    optimizedSkillMarkdown: null,
+    optimizationNotes: [],
+    errorMessage: null,
+  };
+}
+
+export async function createOrGetSkillOptimizationSession(input: {
+  runId: string;
+  sourceSkillOrigin: "site_skill" | "none";
+}): Promise<SkillOptimizationSessionRecord> {
+  const db = await getDb();
+  const now = Date.now();
+
+  const existing = (
+    await db
+      .select()
+      .from(skillOptimizationSessions)
+      .where(eq(skillOptimizationSessions.runId, input.runId))
+      .limit(1)
+  )[0];
+
+  if (existing) {
+    return {
+      id: existing.id,
+      runId: existing.runId,
+      status: existing.status as SkillOptimizationStatus,
+      sourceSkillOrigin: existing.sourceSkillOrigin as "site_skill" | "none",
+      baselineTotals: existing.baselineSummaryJson
+        ? (JSON.parse(existing.baselineSummaryJson) as RunAggregateScore)
+        : null,
+      optimizedTotals: existing.optimizedSummaryJson
+        ? (JSON.parse(existing.optimizedSummaryJson) as RunAggregateScore)
+        : null,
+      delta: existing.deltaJson
+        ? (JSON.parse(existing.deltaJson) as SkillOptimizationSessionRecord["delta"])
+        : null,
+      errorMessage: existing.errorMessage ?? null,
+    };
+  }
+
+  const inserted = await db.insert(skillOptimizationSessions).values({
+    runId: input.runId,
+    status: "not_started",
+    sourceSkillOrigin: input.sourceSkillOrigin,
+    baselineSummaryJson: null,
+    optimizedSummaryJson: null,
+    deltaJson: null,
+    errorMessage: null,
+    createdAt: now,
+    updatedAt: now,
+  }).returning({ id: skillOptimizationSessions.id });
+
+  return {
+    id: inserted[0]!.id,
+    runId: input.runId,
+    status: "not_started",
+    sourceSkillOrigin: input.sourceSkillOrigin,
+    baselineTotals: null,
+    optimizedTotals: null,
+    delta: null,
+    errorMessage: null,
+  };
+}
+
+export async function updateSkillOptimizationSession(
+  runId: string,
+  patch: {
+    status?: SkillOptimizationStatus;
+    baselineTotals?: RunAggregateScore | null;
+    optimizedTotals?: RunAggregateScore | null;
+    delta?: SkillOptimizationSessionRecord["delta"];
+    errorMessage?: string | null;
+  },
+): Promise<void> {
+  const db = await getDb();
+  const row = (
+    await db
+      .select()
+      .from(skillOptimizationSessions)
+      .where(eq(skillOptimizationSessions.runId, runId))
+      .limit(1)
+  )[0];
+
+  if (!row) {
+    return;
+  }
+
+  await db
+    .update(skillOptimizationSessions)
+    .set({
+      status: patch.status ?? row.status,
+      baselineSummaryJson:
+        patch.baselineTotals !== undefined
+          ? (patch.baselineTotals ? JSON.stringify(patch.baselineTotals) : null)
+          : row.baselineSummaryJson,
+      optimizedSummaryJson:
+        patch.optimizedTotals !== undefined
+          ? (patch.optimizedTotals ? JSON.stringify(patch.optimizedTotals) : null)
+          : row.optimizedSummaryJson,
+      deltaJson:
+        patch.delta !== undefined
+          ? (patch.delta ? JSON.stringify(patch.delta) : null)
+          : row.deltaJson,
+      errorMessage: patch.errorMessage !== undefined ? patch.errorMessage : row.errorMessage,
+      updatedAt: Date.now(),
+    })
+    .where(eq(skillOptimizationSessions.id, row.id));
+}
+
+export async function persistSkillOptimizationArtifact(input: {
+  runId: string;
+  artifactType: SkillOptimizationArtifactType;
+  content: string;
+  contentHash: string;
+  metadata?: Record<string, unknown>;
+}): Promise<void> {
+  const db = await getDb();
+  const session = (
+    await db
+      .select()
+      .from(skillOptimizationSessions)
+      .where(eq(skillOptimizationSessions.runId, input.runId))
+      .limit(1)
+  )[0];
+
+  if (!session) {
+    return;
+  }
+
+  await db.insert(skillOptimizationArtifacts).values({
+    sessionId: session.id,
+    artifactType: input.artifactType,
+    content: input.content,
+    contentHash: input.contentHash,
+    metadataJson: input.metadata ? JSON.stringify(input.metadata) : null,
+    createdAt: Date.now(),
+  });
+}
+
+function computeDelta(
+  baselineTotals: RunAggregateScore | null,
+  optimizedTotals: RunAggregateScore | null,
+): SkillOptimizationSessionRecord["delta"] {
+  if (!baselineTotals || !optimizedTotals) {
+    return null;
+  }
+
+  return {
+    passRateDelta: Number((optimizedTotals.passRate - baselineTotals.passRate).toFixed(4)),
+    averageScoreDelta: Number((optimizedTotals.averageScore - baselineTotals.averageScore).toFixed(4)),
+    passedTasksDelta: optimizedTotals.passedTasks - baselineTotals.passedTasks,
+    failedTasksDelta: optimizedTotals.failedTasks - baselineTotals.failedTasks,
+  };
+}
+
 export async function getRunDetail(runId: string): Promise<RunDetailResponse | null> {
   const db = await getDb();
   const run = await getRun(runId);
@@ -652,13 +878,20 @@ export async function getRunDetail(runId: string): Promise<RunDetailResponse | n
   const evaluationRows = await db
     .select()
     .from(taskEvaluations)
-    .where(eq(taskEvaluations.runId, runId));
+    .where(eq(taskEvaluations.runId, runId))
+    .orderBy(asc(taskEvaluations.id));
 
   const recentEventRows = await db
     .select()
     .from(runEvents)
     .where(eq(runEvents.runId, runId))
     .orderBy(desc(runEvents.id))
+    .limit(200);
+  const runErrorRows = await db
+    .select()
+    .from(runErrors)
+    .where(eq(runErrors.runId, runId))
+    .orderBy(desc(runErrors.id))
     .limit(200);
 
   const [workers, taskExecutionRows, recentSteps] = await Promise.all([
@@ -668,17 +901,82 @@ export async function getRunDetail(runId: string): Promise<RunDetailResponse | n
   ]);
 
   const evalMap = new Map<string, TaskEvaluationResult>();
+  const baselineEvalMap = new Map<string, TaskEvaluationResult>();
+  const optimizedEvalMap = new Map<string, TaskEvaluationResult>();
   for (const row of evaluationRows) {
     const scores = JSON.parse(row.criterionScoresJson) as TaskEvaluationResult["criterionScores"];
-    evalMap.set(row.taskId, {
+    const evaluation: TaskEvaluationResult = {
       taskId: row.taskId,
       pass: row.pass,
       failureClass: (row.failureClass as TaskEvaluationResult["failureClass"]) ?? null,
       rationale: row.rationale,
       confidence: row.confidence,
       criterionScores: scores,
-    });
+    };
+    const phase = (row.phase ?? "baseline") as TaskPhase;
+    evalMap.set(row.taskId, evaluation);
+    if (phase === "optimized") {
+      optimizedEvalMap.set(row.taskId, evaluation);
+      continue;
+    }
+    baselineEvalMap.set(row.taskId, evaluation);
   }
+
+  const optimizationRow = (
+    await db
+      .select()
+      .from(skillOptimizationSessions)
+      .where(eq(skillOptimizationSessions.runId, runId))
+      .limit(1)
+  )[0];
+  const optimization = defaultOptimizationResponse();
+
+  if (optimizationRow) {
+    optimization.status = optimizationRow.status as SkillOptimizationStatus;
+    optimization.sourceSkillOrigin = optimizationRow.sourceSkillOrigin as "site_skill" | "none";
+    optimization.baselineTotals = optimizationRow.baselineSummaryJson
+      ? (JSON.parse(optimizationRow.baselineSummaryJson) as RunAggregateScore)
+      : null;
+    optimization.optimizedTotals = optimizationRow.optimizedSummaryJson
+      ? (JSON.parse(optimizationRow.optimizedSummaryJson) as RunAggregateScore)
+      : null;
+    optimization.delta = optimizationRow.deltaJson
+      ? (JSON.parse(optimizationRow.deltaJson) as RunDetailResponse["optimization"]["delta"])
+      : computeDelta(optimization.baselineTotals, optimization.optimizedTotals);
+    optimization.errorMessage = optimizationRow.errorMessage ?? null;
+
+    const artifacts = await db
+      .select()
+      .from(skillOptimizationArtifacts)
+      .where(eq(skillOptimizationArtifacts.sessionId, optimizationRow.id))
+      .orderBy(asc(skillOptimizationArtifacts.id));
+
+    for (const artifact of artifacts) {
+      if (artifact.artifactType === "optimized_skill") {
+        optimization.optimizedSkillMarkdown = artifact.content;
+      }
+      if (artifact.artifactType === "generation_output") {
+        const parsed = artifact.metadataJson
+          ? (JSON.parse(artifact.metadataJson) as { optimizationNotes?: string[] })
+          : undefined;
+        if (parsed?.optimizationNotes) {
+          optimization.optimizationNotes = parsed.optimizationNotes;
+        }
+      }
+    }
+  }
+
+  optimization.taskComparisons = taskRows.map((task) => {
+    const baseline = baselineEvalMap.get(task.taskId) ?? null;
+    const optimized = optimizedEvalMap.get(task.taskId) ?? null;
+    return {
+      taskId: task.taskId,
+      baselinePass: baseline?.pass ?? null,
+      optimizedPass: optimized?.pass ?? null,
+      baselineScore: baseline ? baseline.criterionScores.average : null,
+      optimizedScore: optimized ? optimized.criterionScores.average : null,
+    };
+  });
 
   return {
     run: {
@@ -698,7 +996,7 @@ export async function getRunDetail(runId: string): Promise<RunDetailResponse | n
       difficulty: task.difficulty,
       status: task.status as TaskStatus,
       expectedSignals: JSON.parse(task.expectedSignalsJson) as string[],
-      evaluation: evalMap.get(task.taskId) ?? null,
+      evaluation: optimizedEvalMap.get(task.taskId) ?? baselineEvalMap.get(task.taskId) ?? evalMap.get(task.taskId) ?? null,
     })),
     workers,
     taskExecutions: taskExecutionRows,
@@ -712,6 +1010,19 @@ export async function getRunDetail(runId: string): Promise<RunDetailResponse | n
         createdAt: row.createdAt,
       }))
       .reverse(),
+    runErrors: runErrorRows
+      .map((row) => ({
+        id: row.id,
+        phase: row.phase,
+        errorCode: row.errorCode,
+        message: row.message,
+        details: row.detailsJson
+          ? (JSON.parse(row.detailsJson) as Record<string, unknown>)
+          : null,
+        createdAt: row.createdAt,
+      }))
+      .reverse(),
+    optimization,
   };
 }
 
@@ -746,6 +1057,80 @@ export async function cancelRun(runId: string): Promise<void> {
     phase: "run",
     message: "Run cancellation requested.",
   });
+}
+
+export async function deleteRun(runId: string): Promise<boolean> {
+  const db = await getDb();
+  const existing = await db
+    .select({ id: runs.id })
+    .from(runs)
+    .where(eq(runs.id, runId))
+    .limit(1);
+
+  if (!existing[0]) {
+    return false;
+  }
+
+  await db.transaction(async (tx) => {
+    const executionRows = await tx
+      .select({ id: taskExecutions.id })
+      .from(taskExecutions)
+      .where(eq(taskExecutions.runId, runId));
+    const executionIds = executionRows.map((row) => row.id);
+
+    if (executionIds.length > 0) {
+      const stepRows = await tx
+        .select({ id: taskSteps.id })
+        .from(taskSteps)
+        .where(inArray(taskSteps.taskExecutionId, executionIds));
+      const stepIds = stepRows.map((row) => row.id);
+
+      if (stepIds.length > 0) {
+        await tx
+          .delete(taskStepCitations)
+          .where(inArray(taskStepCitations.taskStepId, stepIds));
+      }
+
+      await tx
+        .delete(deterministicChecks)
+        .where(inArray(deterministicChecks.taskExecutionId, executionIds));
+      await tx
+        .delete(taskAgentState)
+        .where(inArray(taskAgentState.taskExecutionId, executionIds));
+      await tx
+        .delete(taskSteps)
+        .where(inArray(taskSteps.taskExecutionId, executionIds));
+      await tx
+        .delete(taskExecutions)
+        .where(eq(taskExecutions.runId, runId));
+    }
+
+    const sessionRows = await tx
+      .select({ id: skillOptimizationSessions.id })
+      .from(skillOptimizationSessions)
+      .where(eq(skillOptimizationSessions.runId, runId));
+    const sessionIds = sessionRows.map((row) => row.id);
+
+    if (sessionIds.length > 0) {
+      await tx
+        .delete(skillOptimizationArtifacts)
+        .where(inArray(skillOptimizationArtifacts.sessionId, sessionIds));
+    }
+
+    await tx
+      .delete(skillOptimizationSessions)
+      .where(eq(skillOptimizationSessions.runId, runId));
+    await tx.delete(runWorkers).where(eq(runWorkers.runId, runId));
+    await tx.delete(taskEvaluations).where(eq(taskEvaluations.runId, runId));
+    await tx.delete(taskAttempts).where(eq(taskAttempts.runId, runId));
+    await tx.delete(tasks).where(eq(tasks.runId, runId));
+    await tx.delete(ingestionArtifacts).where(eq(ingestionArtifacts.runId, runId));
+    await tx.delete(runErrors).where(eq(runErrors.runId, runId));
+    await tx.delete(runEvents).where(eq(runEvents.runId, runId));
+    await tx.delete(runs).where(eq(runs.id, runId));
+  });
+
+  return true;
 }
 
 export async function isRunCanceled(runId: string): Promise<boolean> {
@@ -898,12 +1283,14 @@ export async function persistTaskEvaluation(
   runId: string,
   evaluation: TaskEvaluationResult,
   judgeModel: string,
+  phase: TaskPhase = "baseline",
 ): Promise<void> {
   const db = await getDb();
 
   await db.insert(taskEvaluations).values({
     runId,
     taskId: evaluation.taskId,
+    phase,
     criterionScoresJson: JSON.stringify(evaluation.criterionScores),
     pass: evaluation.pass,
     failureClass: evaluation.failureClass,
@@ -916,13 +1303,20 @@ export async function persistTaskEvaluation(
   await updateTaskStatus(runId, evaluation.taskId, evaluation.pass ? "passed" : "failed");
 }
 
-export async function listTaskEvaluations(runId: string): Promise<TaskEvaluationResult[]> {
+export async function listTaskEvaluations(
+  runId: string,
+  phase?: TaskPhase,
+): Promise<TaskEvaluationResult[]> {
   const db = await getDb();
 
   const rows = await db
     .select()
     .from(taskEvaluations)
-    .where(eq(taskEvaluations.runId, runId));
+    .where(
+      phase
+        ? and(eq(taskEvaluations.runId, runId), eq(taskEvaluations.phase, phase))
+        : eq(taskEvaluations.runId, runId),
+    );
 
   return rows.map((row) => ({
     taskId: row.taskId,

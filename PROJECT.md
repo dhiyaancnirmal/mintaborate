@@ -1,62 +1,99 @@
 # Mintaborate
 
-## What This Is
+## Core Question
+When a developer tells an agent to implement a workflow using Product Y's docs, does that documentation actually lead to a working result?
 
-Mintaborate is a documentation agent-readiness testing tool built as a portfolio project targeting Mintlify. It evaluates how well a company's Mintlify-powered documentation performs when AI agents try to use it to accomplish real tasks.
+Mintaborate answers this by simulating real developer-agent implementation workflows and measuring outcome quality, failure causes, and doc fixes.
 
-Think of it as **CI/CD for documentation quality, from the agent's perspective.**
+## Why Readability Scoring Is Not Enough
+Agent-readable formats are useful, but readability alone is not the outcome teams care about.
 
-The core loop:
-1. User pastes a Mintlify docs URL
-2. The tool defines a set of agent tasks against those docs (e.g., "authenticate with the API", "set up webhooks", "deploy to production")
-3. An AI agent attempts each task using only the documentation (via MCP, llms.txt, or direct scraping)
-4. Each task gets scored: pass/fail, with a diagnosis of *why* it failed (missing page, ambiguous instructions, outdated code sample, etc.)
-5. Results are displayed as a dashboard — a "report card" for documentation agent-readiness
+The critical question is execution effectiveness:
+- Did the agent find the right pages?
+- Did it combine the right details across pages?
+- Did it produce correct and actionable implementation output?
+- Did the result remain grounded in documented behavior?
 
-### The Extended Loop (skill.md optimization)
-Once the test suite runs, Mintaborate can also:
-- Evaluate the auto-generated skill.md from the Mintlify site
-- Re-run the test suite with the skill.md in context
-- Generate an optimized skill.md based on failure analysis
-- Re-run again and show the before/after delta
+Mintaborate focuses on this end-to-end chain, not just whether docs are parsable.
 
-This creates a complete feedback loop: **test → diagnose → improve → re-test.**
+## Product Definition
+Mintaborate is an agent effectiveness simulation tool for documentation quality.
 
-## Why This Matters to Mintlify
+It runs implementation tasks against a docs source using only retrieved documentation context, then evaluates outcomes with deterministic checks plus LLM judging.
 
-Mintlify's entire strategic direction is "documentation is now as much for AI agents as for humans." They've shipped:
-- **Agent analytics** (Feb 2026) — passive observation of which agents visit and what they access
-- **skill.md** (Jan 2026) — condensed capability files that agents can install
-- **llms.txt / llms-full.txt** — plain text doc formats optimized for LLM ingestion
-- **Autopilot** (Dec 2025) — monitors codebase changes and auto-generates doc update PRs
-- **MCP server support** — lets agents query docs directly
-- **Content negotiation** — serves markdown to agents, HTML to humans
+Output is diagnostics-first, score-second:
+- Task pass/fail and rubric scores
+- Trace evidence for each decision
+- Failure attribution and suggested doc fixes
 
-**The gap Mintaborate fills:** Mintlify shows you *what* agents do (analytics). Mintaborate shows you *where agents fail and why*. Nobody is actively testing whether docs work for agents. This is the missing piece in their product story.
+## Workflow Simulation Engine
+For each task, workers execute an iterative loop:
+- `retrieve`
+- `plan`
+- `act`
+- `reflect`
 
-Mintlify could ship this as a feature: every time a customer deploys docs, run the test suite, flag regressions, suggest skill.md improvements. That's the pitch.
+This loop repeats until stop criteria are met. Every step is persisted for replay and analysis:
+- Retrieved chunks and relevance scores
+- Model prompts and responses
+- Citations and selected sources
+- Decisions, memory state, and termination reason
+- Token and cost telemetry
 
-## Why This Project Exists
+## Evaluation Pipeline
+Evaluation is two-stage:
 
-This is being built by Dhiyaan as a portfolio project to demonstrate value to Mintlify and land an engineering role. The strategy:
-- Build it as a real, functional tool
-- Record a high-quality Screen Studio video walkthrough
-- Post on Twitter and email directly to Mintlify team
-- Show deep understanding of their product, codebase, and strategic direction
+1. Deterministic gates
+- Citation presence
+- Signal coverage
+- Step depth/effort
+- Termination behavior
 
-The video narrative should flow as:
-1. "Here's [Company X]'s Mintlify docs. I defined 15 agent tasks."
-2. "11 pass. 4 fail. Here's why each fails."
-3. "Now here's their auto-generated skill.md. Re-run: 12 pass — marginal improvement."
-4. "Here's an optimized skill.md using failure data. Re-run: 14 pass."
-5. "This feedback loop could be a Mintlify feature."
+2. LLM judge (constrained by gates)
+- Completeness
+- Correctness
+- Groundedness
+- Actionability
 
-## Key Mintlify Context
+Deterministic checks reduce false positives and prevent high rubric scores from masking trace-level issues.
 
-- ~35 person team, SF-based, YC W22, $22M raised (a16z Series A)
-- 18,000+ companies, 100M+ developers annually
-- Customers include Anthropic, Cursor, Perplexity, Coinbase, Vercel, X
-- They value "slope over y-intercept" — learning velocity and grit
-- Interview process involves Next.js take-homes and React debugging sessions
-- Acquired Trieve (search/RAG company), built custom analytics on ClickHouse + Kafka
-- Key people: Han Wang (co-founder), Hahnbee Lee (co-founder), Dens Sumesh (engineer, ex-Trieve), Nick Khami (engineer)
+## Product Modes
+### 1) Single-Docs Optimization
+Run tasks on one docs source to identify implementation blockers and produce concrete documentation fixes.
+
+### 2) Cross-Platform Directional Comparison
+Run equivalent task sets across comparable products on different docs platforms to measure directional deltas in agent outcomes.
+
+This is useful for positioning and decision support when framed honestly as directional demo evidence.
+
+## Mintlify Strategic Fit
+Mintlify's agent analytics can show where agents navigate. Mintaborate adds outcome evaluation:
+- Did the task succeed?
+- What failed?
+- Which doc change is most likely to improve success?
+
+This closes the loop from observed behavior to measurable execution quality.
+
+## Fairness Protocol For Comparison Mode
+To keep comparisons credible:
+- Use fixed task sets per category and keep complexity balanced
+- Justify product pairing (similar API/workflow scope)
+- Publish caveats and label results as directional
+- Avoid cherry-picking; include cases where non-Mintlify docs perform well
+- Attribute wins/losses to specific mechanisms when possible (`llms-full.txt`, `skill.md`, content negotiation, MCP support, information architecture)
+
+## Scope
+Current scope is a focused demo:
+- No auth or user accounts
+- SQLite + Drizzle persistence for reproducible runs
+- Fast setup and strong narrative for a short walkthrough
+
+The goal is a convincing, technically grounded prototype, not a production benchmarking suite.
+
+## Canonical Demo Narrative (3 Acts)
+1. **Act 1: Simulation**
+Run implementation tasks against one docs source and show outcomes with full execution traces.
+2. **Act 2: Comparison**
+Run equivalent tasks on a comparable product/docs platform pair and present directional deltas.
+3. **Act 3: Product Implication**
+Show how failure attribution and doc-fix recommendations can improve outcomes over re-runs.

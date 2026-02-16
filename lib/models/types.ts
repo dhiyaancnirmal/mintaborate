@@ -1,6 +1,11 @@
 import type { ZodType } from "zod";
 
-export type ModelProvider = "openai" | "anthropic" | "openai-compatible";
+export type ModelProvider =
+  | "openai"
+  | "anthropic"
+  | "openai-compatible"
+  | "gemini"
+  | "openrouter";
 
 export interface ModelConfig {
   provider: ModelProvider;
@@ -17,6 +22,7 @@ export interface ModelConfig {
 export interface ModelMessage {
   role: "system" | "user" | "assistant";
   content: string;
+  reasoningDetails?: unknown;
 }
 
 export interface ModelUsage {
@@ -35,6 +41,7 @@ export interface TextCompletionResponse {
   latencyMs: number;
   provider: ModelProvider;
   model: string;
+  reasoningDetails?: unknown;
 }
 
 export interface JsonCompletionRequest<T> {

@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   StatusDot,
   MonoLabel,
@@ -122,6 +124,23 @@ interface EventMessage {
   createdAt: number;
 }
 
+interface RunErrorMessage {
+  id: number;
+  phase: string;
+  errorCode: string;
+  message: string;
+  details: Record<string, unknown> | null;
+  createdAt: number;
+}
+
+interface RunSummary {
+  id: string;
+  docsUrl: string;
+  status: string;
+  startedAt: number;
+  endedAt: number | null;
+}
+
 interface RunDetail {
   run: {
     id: string;
@@ -140,6 +159,7 @@ interface RunDetail {
     config: {
       runModel: { provider: string; model: string };
       judgeModel: { provider: string; model: string };
+      enableSkillOptimization: boolean;
       budget: {
         maxTasks: number;
         maxStepsPerTask: number;
@@ -154,17 +174,23 @@ interface RunDetail {
   taskExecutions: TaskExecutionView[];
   recentSteps: StepTraceView[];
   recentEvents: EventMessage[];
+  runErrors: RunErrorMessage[];
   optimization: OptimizationData;
 }
 
 /* ─── Component ──────────────────────────────────────────── */
 
 export default function RunReportClient({ runId }: { runId: string }) {
+  const router = useRouter();
   const [detail, setDetail] = useState<RunDetail | null>(null);
+  const [runs, setRuns] = useState<RunSummary[]>([]);
   const [events, setEvents] = useState<EventMessage[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [deletingRunId, setDeletingRunId] = useState<string | null>(null);
+  const [nowTs, setNowTs] = useState(0);
   const eventLogRef = useRef<HTMLDivElement>(null);
 
   const fetchDetail = useCallback(async () => {
@@ -173,11 +199,21 @@ export default function RunReportClient({ runId }: { runId: string }) {
     return (await res.json()) as RunDetail;
   }, [runId]);
 
+  const fetchRuns = useCallback(async () => {
+    const res = await fetch("/api/runs", { cache: "no-store" });
+    if (!res.ok) {
+      return [];
+    }
+    const payload = (await res.json()) as { runs: RunSummary[] };
+    return payload.runs;
+  }, []);
+
   useEffect(() => {
     fetchDetail()
       .then((d) => {
         setDetail(d);
         setEvents(d.recentEvents);
+        setNowTs(Date.now());
         setLoading(false);
       })
       .catch((err) => {
@@ -187,6 +223,10 @@ export default function RunReportClient({ runId }: { runId: string }) {
   }, [fetchDetail]);
 
   useEffect(() => {
+    fetchRuns().then((data) => setRuns(data)).catch(() => {});
+  }, [fetchRuns]);
+
+  useEffect(() => {
     const es = new EventSource(`/api/runs/${runId}/events`);
 
     es.addEventListener("message", () => {
@@ -194,8 +234,10 @@ export default function RunReportClient({ runId }: { runId: string }) {
         .then((d) => {
           setDetail(d);
           setEvents(d.recentEvents);
+          setNowTs(Date.now());
         })
         .catch(() => {});
+      fetchRuns().then((data) => setRuns(data)).catch(() => {});
     });
 
     es.addEventListener("done", () => {
@@ -203,13 +245,35 @@ export default function RunReportClient({ runId }: { runId: string }) {
         .then((d) => {
           setDetail(d);
           setEvents(d.recentEvents);
+          setNowTs(Date.now());
         })
         .catch(() => {});
+      fetchRuns().then((data) => setRuns(data)).catch(() => {});
       es.close();
     });
 
     return () => { es.close(); };
-  }, [runId, fetchDetail]);
+  }, [runId, fetchDetail, fetchRuns]);
+
+  useEffect(() => {
+    const runStatus = detail?.run.status;
+    if (!runStatus || !isActiveStatus(runStatus)) {
+      return;
+    }
+
+    const interval = setInterval(() => {
+      setNowTs(Date.now());
+      fetchDetail()
+        .then((d) => {
+          setDetail(d);
+          setEvents(d.recentEvents);
+          setNowTs(Date.now());
+        })
+        .catch(() => {});
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [detail?.run.status, fetchDetail]);
 
   useEffect(() => {
     if (eventLogRef.current) {
@@ -221,6 +285,39 @@ export default function RunReportClient({ runId }: { runId: string }) {
     await fetch(`/api/runs/${runId}/cancel`, { method: "POST" });
     const d = await fetchDetail();
     setDetail(d);
+    setNowTs(Date.now());
+    const updatedRuns = await fetchRuns();
+    setRuns(updatedRuns);
+  }
+
+  async function handleDeleteRun(targetRunId: string) {
+    const confirmed = window.confirm("Delete this run permanently?");
+    if (!confirmed) {
+      return;
+    }
+
+    setActionError(null);
+    setDeletingRunId(targetRunId);
+
+    try {
+      const res = await fetch(`/api/runs/${targetRunId}`, { method: "DELETE" });
+      if (!res.ok) {
+        const payload = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(payload?.error ?? "Failed to delete run");
+      }
+
+      if (targetRunId === runId) {
+        router.push("/");
+        return;
+      }
+
+      const updatedRuns = await fetchRuns();
+      setRuns(updatedRuns);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Failed to delete run");
+    } finally {
+      setDeletingRunId(null);
+    }
   }
 
   const totals = detail?.run.totals;
@@ -232,7 +329,13 @@ export default function RunReportClient({ runId }: { runId: string }) {
   );
 
   const selectedExecution = useMemo(
-    () => detail?.taskExecutions.find((te) => te.taskId === selectedTaskId) ?? null,
+    () => {
+      if (!detail || !selectedTaskId) {
+        return null;
+      }
+      const matches = detail.taskExecutions.filter((te) => te.taskId === selectedTaskId);
+      return matches.at(-1) ?? null;
+    },
     [detail, selectedTaskId],
   );
 
@@ -272,56 +375,146 @@ export default function RunReportClient({ runId }: { runId: string }) {
   /* ─── Render ─── */
 
   return (
-    <main style={{ minHeight: "100vh" }}>
-      {/* Header Bar */}
-      <header
+    <main style={{ minHeight: "100vh", display: "flex" }}>
+      <aside
         style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          height: 48,
-          padding: "0 24px",
-          borderBottom: "1px solid var(--border-default)",
+          width: 260,
+          borderRight: "1px solid var(--border-default)",
           background: "var(--surface-0)",
+          padding: "16px 12px",
+          display: "flex",
+          flexDirection: "column",
+          gap: 12,
         }}
       >
-        <a href="/" style={{ display: "flex", alignItems: "center", gap: 8, textDecoration: "none" }}>
-          <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "var(--accent)" }} />
-          <span
-            style={{
-              fontFamily: "var(--font-mono)",
-              fontSize: 13,
-              fontWeight: 600,
-              textTransform: "uppercase",
-              letterSpacing: "0.1em",
-              color: "var(--text-primary)",
-            }}
-          >
-            Mintaborate
-          </span>
-        </a>
-        <a
-          href="https://mintlify.com"
-          target="_blank"
-          rel="noreferrer"
+        <Link
+          href="/"
           style={{
+            textDecoration: "none",
+            fontSize: 18,
+            fontWeight: 600,
+            color: "var(--text-primary)",
+            padding: "0 8px",
+          }}
+        >
+          Mintaborate
+        </Link>
+
+        <Link
+          href="/"
+          style={{
+            display: "inline-flex",
+            alignSelf: "flex-start",
+            textDecoration: "none",
             fontFamily: "var(--font-mono)",
             fontSize: 11,
-            fontWeight: 500,
             textTransform: "uppercase",
             letterSpacing: "0.06em",
             color: "var(--text-secondary)",
-            textDecoration: "none",
-            padding: "6px 12px",
             border: "1px solid var(--border-emphasis)",
             borderRadius: "var(--radius)",
+            padding: "6px 10px",
+            margin: "0 8px",
           }}
         >
-          Mintlify
-        </a>
-      </header>
+          New Run
+        </Link>
 
-      <div style={{ maxWidth: 1200, margin: "0 auto", padding: "24px 24px 48px" }}>
+        <div style={{ padding: "0 8px" }}>
+          <MonoLabel>Previous Runs</MonoLabel>
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, overflowY: "auto", maxHeight: "calc(100vh - 140px)" }}>
+          {runs.map((run) => {
+            const selected = run.id === runId;
+            return (
+              <div
+                key={run.id}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr auto",
+                  gap: 8,
+                  alignItems: "center",
+                }}
+              >
+                <Link
+                  href={`/runs/${run.id}`}
+                  style={{
+                    textDecoration: "none",
+                    border: selected ? "1px solid var(--border-accent)" : "1px solid transparent",
+                    background: selected ? "var(--surface-2)" : "transparent",
+                    borderRadius: "var(--radius)",
+                    padding: "8px",
+                    minWidth: 0,
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <StatusDot status={run.status} size={6} />
+                    <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {run.id}
+                    </span>
+                  </div>
+                  <p style={{ marginTop: 4, fontSize: 11, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {run.docsUrl}
+                  </p>
+                </Link>
+                <Button
+                  type="button"
+                  variant="danger"
+                  style={{ padding: "6px 10px", fontSize: 11 }}
+                  disabled={deletingRunId === run.id}
+                  onClick={() => {
+                    void handleDeleteRun(run.id);
+                  }}
+                >
+                  {deletingRunId === run.id ? "Deleting" : "Delete"}
+                </Button>
+              </div>
+            );
+          })}
+          {runs.length === 0 && (
+            <p style={{ padding: "0 8px", fontSize: 12, color: "var(--text-muted)" }}>No previous runs.</p>
+          )}
+        </div>
+        {actionError && (
+          <p style={{ padding: "0 8px", fontSize: 12, color: "var(--status-fail)" }}>{actionError}</p>
+        )}
+      </aside>
+
+      <div style={{ flex: 1 }}>
+        <header
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            height: 52,
+            padding: "0 24px",
+            borderBottom: "1px solid var(--border-default)",
+            background: "var(--surface-0)",
+          }}
+        >
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-secondary)" }}>
+            Run Report
+          </span>
+          <Link
+            href="/"
+            style={{
+              textDecoration: "none",
+              fontFamily: "var(--font-mono)",
+              fontSize: 11,
+              textTransform: "uppercase",
+              letterSpacing: "0.06em",
+              color: "var(--text-secondary)",
+              border: "1px solid var(--border-emphasis)",
+              borderRadius: "var(--radius)",
+              padding: "6px 10px",
+            }}
+          >
+            Back
+          </Link>
+        </header>
+
+        <div style={{ maxWidth: 1200, margin: "0 auto", padding: "24px 24px 48px" }}>
         {/* Run Header */}
         <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap", marginBottom: 24 }}>
           <StatusDot status={detail.run.status} size={12} />
@@ -333,7 +526,7 @@ export default function RunReportClient({ runId }: { runId: string }) {
             {detail.run.docsUrl}
           </span>
           <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-muted)" }}>
-            {formatDuration(detail.run.startedAt, detail.run.endedAt)}
+            {formatDuration(detail.run.startedAt, detail.run.endedAt ?? nowTs)}
           </span>
           {active && (
             <Button variant="danger" onClick={handleCancel} style={{ marginLeft: "auto" }}>
@@ -345,9 +538,13 @@ export default function RunReportClient({ runId }: { runId: string }) {
         {/* Metrics Row */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 12, marginBottom: 24 }}>
           <MetricCard label="Total Tasks" value={totals?.totalTasks ?? detail.tasks.length} />
-          <MetricCard label="Passed" value={totals?.passedTasks ?? 0} accent />
+          <MetricCard label="Passed" value={totals?.passedTasks ?? 0} accent={!!totals && totals.passedTasks > 0} />
           <MetricCard label="Failed" value={totals?.failedTasks ?? 0} />
-          <MetricCard label="Pass Rate" value={totals ? `${(totals.passRate * 100).toFixed(0)}%` : "--"} accent />
+          <MetricCard
+            label="Pass Rate"
+            value={totals ? `${(totals.passRate * 100).toFixed(0)}%` : "--"}
+            accent={!!totals && totals.passRate > 0}
+          />
           <MetricCard label="Avg Score" value={totals ? totals.averageScore.toFixed(1) : "--"} />
         </div>
 
@@ -662,6 +859,46 @@ export default function RunReportClient({ runId }: { runId: string }) {
               </div>
             </Card>
 
+            {/* Error Log */}
+            {detail.runErrors.length > 0 && (
+              <Card>
+                <MonoLabel>Error Log</MonoLabel>
+                <div
+                  style={{
+                    marginTop: 10,
+                    maxHeight: 280,
+                    overflowY: "auto",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 6,
+                  }}
+                >
+                  {detail.runErrors.map((err) => (
+                    <div
+                      key={err.id}
+                      style={{
+                        border: "1px solid var(--border-default)",
+                        borderRadius: "var(--radius)",
+                        background: "var(--surface-2)",
+                        padding: "8px 10px",
+                      }}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                        <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-muted)" }}>
+                          {formatTimestamp(err.createdAt)}
+                        </span>
+                        <Badge color="var(--status-fail)">{err.errorCode}</Badge>
+                        <Badge>{err.phase}</Badge>
+                      </div>
+                      <p style={{ margin: 0, fontSize: 12, color: "var(--text-secondary)", lineHeight: 1.5 }}>
+                        {err.message}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </Card>
+            )}
+
             {/* Config Panel */}
             <Card>
               <MonoLabel>Config</MonoLabel>
@@ -671,9 +908,11 @@ export default function RunReportClient({ runId }: { runId: string }) {
                 <ConfigRow label="Budget" value={formatCost(detail.run.config.budget.hardCostCapUsd)} />
                 <ConfigRow label="Concurrency" value={String(detail.run.config.executionConcurrency)} />
                 <ConfigRow label="Max Steps" value={String(detail.run.config.budget.maxStepsPerTask)} />
+                <ConfigRow label="Optimization" value={detail.run.config.enableSkillOptimization ? "Enabled" : "Disabled"} />
               </div>
             </Card>
           </div>
+        </div>
         </div>
       </div>
     </main>
@@ -695,7 +934,9 @@ function ConfigRow({ label, value }: { label: string; value: string }) {
 
 function StepRow({ step }: { step: StepTraceView }) {
   const [expanded, setExpanded] = useState(false);
-  const usage = step.usage as { inputTokens?: number; outputTokens?: number } | null;
+  const usage = step.usage as
+    | { inputTokens?: number; outputTokens?: number; resolvedModel?: string }
+    | null;
   const phaseTag = step.phase.toUpperCase();
 
   return (
@@ -724,6 +965,11 @@ function StepRow({ step }: { step: StepTraceView }) {
         {usage && (
           <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-muted)" }}>
             {((usage.inputTokens ?? 0) + (usage.outputTokens ?? 0)).toLocaleString()} tok
+          </span>
+        )}
+        {usage?.resolvedModel && (
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-muted)" }}>
+            {usage.resolvedModel}
           </span>
         )}
         {step.citations.length > 0 && (

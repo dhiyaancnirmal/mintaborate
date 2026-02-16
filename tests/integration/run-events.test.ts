@@ -9,6 +9,8 @@ import {
   runEvents,
   runWorkers,
   runs,
+  skillOptimizationArtifacts,
+  skillOptimizationSessions,
   taskAgentState,
   taskAttempts,
   taskEvaluations,
@@ -21,6 +23,8 @@ import {
 async function resetDb(): Promise<void> {
   const db = await getDb();
   await db.delete(runErrors);
+  await db.delete(skillOptimizationArtifacts);
+  await db.delete(skillOptimizationSessions);
   await db.delete(deterministicChecks);
   await db.delete(taskStepCitations);
   await db.delete(taskSteps);

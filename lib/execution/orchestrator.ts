@@ -1,4 +1,6 @@
 import { ingestDocumentation } from "@/lib/ingestion/fetchers";
+import { createHash } from "node:crypto";
+import pLimit from "p-limit";
 import { generateTasks } from "@/lib/tasks/generator";
 import { buildCorpusChunks, retrieveTopChunksWithScores } from "@/lib/execution/retrieval";
 import {
@@ -12,8 +14,10 @@ import { judgeTaskAttempt } from "@/lib/evaluation/judge";
 import { aggregateRunScores } from "@/lib/scoring/aggregate";
 import type { TaskEvaluationResult } from "@/lib/scoring/types";
 import { evaluateDeterministicGuards } from "@/lib/evaluation/deterministic-checks";
+import { generateOptimizedSkill } from "@/lib/optimization/skill-optimizer";
 import { appendRunEvent } from "@/lib/runs/events";
 import {
+  createOrGetSkillOptimizationSession,
   createTaskExecution,
   ensureRunWorkers,
   finalizeRun,
@@ -24,18 +28,20 @@ import {
   persistDeterministicChecks,
   persistIngestionArtifacts,
   persistRunError,
+  persistSkillOptimizationArtifact,
   persistTaskAttempt,
   persistTaskEvaluation,
   persistTaskStep,
   persistTaskStepCitations,
   persistTasks,
   updateRunStatus,
+  updateSkillOptimizationSession,
   updateTaskExecutionProgress,
   updateTaskStatus,
   updateWorkerStatus,
   upsertTaskAgentState,
 } from "@/lib/runs/service";
-import type { AgentMemoryState, PersistedWorker, TaskStopReason } from "@/lib/runs/types";
+import type { AgentMemoryState, PersistedWorker, TaskPhase, TaskStopReason } from "@/lib/runs/types";
 import type { GeneratedTask } from "@/lib/tasks/types";
 
 const activeRuns = new Set<string>();
@@ -76,11 +82,64 @@ function dedupe<T>(values: T[]): T[] {
   return [...new Set(values)];
 }
 
+function normalizeText(text: string): string {
+  return text.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function expectedSignalCoverage(expectedSignals: string[], candidateText: string): {
+  matched: string[];
+  missed: string[];
+  ratio: number;
+} {
+  if (expectedSignals.length === 0) {
+    return {
+      matched: [],
+      missed: [],
+      ratio: 1,
+    };
+  }
+
+  const normalizedCandidate = normalizeText(candidateText);
+  const matched: string[] = [];
+  const missed: string[] = [];
+
+  for (const signal of expectedSignals) {
+    const normalizedSignal = normalizeText(signal);
+    if (!normalizedSignal) {
+      continue;
+    }
+
+    if (normalizedCandidate.includes(normalizedSignal)) {
+      matched.push(signal);
+    } else {
+      missed.push(signal);
+    }
+  }
+
+  return {
+    matched,
+    missed,
+    ratio: matched.length / Math.max(1, expectedSignals.length),
+  };
+}
+
+function looksLikeMissingContent(text: string): boolean {
+  const normalized = normalizeText(text);
+  const patterns = [
+    /no .* (found|provided|available|documented)/,
+    /(not|unable|cannot|can't) .* (find|locate|access|determine)/,
+    /insufficient .* (context|information|details)/,
+  ];
+
+  return patterns.some((pattern) => pattern.test(normalized));
+}
+
 function toTaskAttempt(input: {
   task: GeneratedTask;
   finalAnswer: string;
   stepOutputs: string[];
   citations: EvidenceCitation[];
+  model: string;
   tokensIn: number;
   tokensOut: number;
   cost: number;
@@ -91,6 +150,7 @@ function toTaskAttempt(input: {
     steps: input.stepOutputs.length > 0 ? input.stepOutputs : [input.finalAnswer],
     citations: input.citations,
     rawOutput: input.finalAnswer,
+    model: input.model,
     usage: {
       inputTokens: input.tokensIn,
       outputTokens: input.tokensOut,
@@ -117,6 +177,8 @@ async function executeTaskOnWorker(input: {
   worker: PersistedWorker;
   task: GeneratedTask;
   chunks: ReturnType<typeof buildCorpusChunks>;
+  phase: TaskPhase;
+  judgeLimit: ReturnType<typeof pLimit>;
 }): Promise<TaskEvaluationResult | null> {
   const run = await getRun(input.runId);
   if (!run) {
@@ -129,6 +191,7 @@ async function executeTaskOnWorker(input: {
     runId: input.runId,
     taskId: input.task.taskId,
     workerId: input.worker.id,
+    phase: input.phase,
   });
 
   let memory = initializeMemory(
@@ -150,9 +213,49 @@ async function executeTaskOnWorker(input: {
   const stepOutputs: string[] = [];
   const citations: EvidenceCitation[] = [];
   let stopReason: TaskStopReason = "step_limit";
+  const maxTaskTokens = run.config.budget.maxTokensPerTask;
+
+  const applyUsage = async (inputUsage: {
+    inputTokens: number;
+    outputTokens: number;
+    costEstimateUsd: number;
+    stepCountDelta?: number;
+  }): Promise<void> => {
+    totalInputTokens += inputUsage.inputTokens;
+    totalOutputTokens += inputUsage.outputTokens;
+    totalCost += inputUsage.costEstimateUsd;
+
+    await incrementRunCost(input.runId, inputUsage.costEstimateUsd);
+    await updateTaskExecutionProgress({
+      taskExecutionId,
+      stepCountDelta: inputUsage.stepCountDelta ?? 0,
+      tokensInDelta: inputUsage.inputTokens,
+      tokensOutDelta: inputUsage.outputTokens,
+      costDelta: inputUsage.costEstimateUsd,
+    });
+
+    memory = {
+      ...memory,
+      remainingBudget: {
+        ...memory.remainingBudget,
+        maxTokensPerTask: Math.max(0, run.config.budget.maxTokensPerTask - totalInputTokens - totalOutputTokens),
+        hardCostCapUsd: Math.max(0, run.config.budget.hardCostCapUsd - totalCost),
+      },
+    };
+
+    await upsertTaskAgentState({
+      taskExecutionId,
+      state: memory,
+    });
+  };
 
   try {
     for (let stepIndex = 1; stepIndex <= run.config.budget.maxStepsPerTask; stepIndex += 1) {
+      if (totalInputTokens + totalOutputTokens >= maxTaskTokens) {
+        stopReason = "token_limit";
+        break;
+      }
+
       if (await isRunCanceled(input.runId)) {
         stopReason = "cancelled";
         await updateTaskStatus(input.runId, input.task.taskId, "skipped");
@@ -167,6 +270,7 @@ async function executeTaskOnWorker(input: {
           message: `Task skipped due to cancellation: ${input.task.name}`,
           data: {
             taskId: input.task.taskId,
+            phase: input.phase,
             workerId: input.worker.id,
             stopReason,
           },
@@ -193,6 +297,7 @@ async function executeTaskOnWorker(input: {
           message: `Task skipped due to cost cap: ${input.task.name}`,
           data: {
             taskId: input.task.taskId,
+            phase: input.phase,
             workerId: input.worker.id,
             stopReason,
           },
@@ -219,6 +324,7 @@ async function executeTaskOnWorker(input: {
         data: {
           workerId: input.worker.id,
           taskId: input.task.taskId,
+          phase: input.phase,
           stepIndex,
           sources: retrievedChunks.map((chunk) => chunk.sourceUrl),
         },
@@ -250,11 +356,17 @@ async function executeTaskOnWorker(input: {
         data: {
           workerId: input.worker.id,
           taskId: input.task.taskId,
+          taskPhase: input.phase,
           stepIndex,
           phase: "retrieve",
           stepId: retrieveStepId,
         },
       });
+
+      if (totalInputTokens + totalOutputTokens >= maxTaskTokens) {
+        stopReason = "token_limit";
+        break;
+      }
 
       const planResult = await runPlanningStep({
         runModel: input.worker.modelConfig,
@@ -275,6 +387,7 @@ async function executeTaskOnWorker(input: {
           raw: planResult.text,
         },
         usage: {
+          resolvedModel: planResult.model,
           inputTokens: planResult.usage.inputTokens,
           outputTokens: planResult.usage.outputTokens,
           latencyMs: planResult.latencyMs,
@@ -289,11 +402,23 @@ async function executeTaskOnWorker(input: {
         data: {
           workerId: input.worker.id,
           taskId: input.task.taskId,
+          taskPhase: input.phase,
           stepIndex,
           phase: "plan",
           stepId: planStepId,
         },
       });
+
+      await applyUsage({
+        inputTokens: planResult.usage.inputTokens,
+        outputTokens: planResult.usage.outputTokens,
+        costEstimateUsd: planResult.costEstimateUsd,
+      });
+
+      if (totalInputTokens + totalOutputTokens >= maxTaskTokens) {
+        stopReason = "token_limit";
+        break;
+      }
 
       const actResult = await runActStep({
         runModel: input.worker.modelConfig,
@@ -323,6 +448,7 @@ async function executeTaskOnWorker(input: {
           })),
         },
         usage: {
+          resolvedModel: actResult.model,
           inputTokens: actResult.usage.inputTokens,
           outputTokens: actResult.usage.outputTokens,
           latencyMs: actResult.latencyMs,
@@ -332,12 +458,36 @@ async function executeTaskOnWorker(input: {
 
       await persistTaskStepCitations(actStepId, actResult.parsed.citations);
 
+      await applyUsage({
+        inputTokens: actResult.usage.inputTokens,
+        outputTokens: actResult.usage.outputTokens,
+        costEstimateUsd: actResult.costEstimateUsd,
+      });
+
+      if (totalInputTokens + totalOutputTokens >= maxTaskTokens) {
+        stopReason = "token_limit";
+        break;
+      }
+
       const reflectResult = await runReflectStep({
         runModel: input.worker.modelConfig,
         task: input.task,
         memory,
         latestActOutput: actResult.parsed,
       });
+
+      const actCombinedText = `${actResult.parsed.answer}\n${actResult.parsed.stepOutput}`;
+      const coverage = expectedSignalCoverage(input.task.expectedSignals, actCombinedText);
+      const shouldForceContinue = !actResult.parsed.done && (
+        stepIndex < 2 ||
+        coverage.ratio < 0.75 ||
+        actResult.parsed.citations.length === 0 ||
+        looksLikeMissingContent(actCombinedText)
+      );
+      const effectiveShouldContinue = shouldForceContinue ? true : reflectResult.parsed.shouldContinue;
+      const effectiveStopReason = shouldForceContinue
+        ? "Continue: output is not yet implementation-complete."
+        : reflectResult.parsed.stopReason;
 
       const reflectStepId = await persistTaskStep({
         taskExecutionId,
@@ -351,11 +501,12 @@ async function executeTaskOnWorker(input: {
           raw: reflectResult.text,
         },
         decision: {
-          shouldContinue: reflectResult.parsed.shouldContinue,
-          stopReason: reflectResult.parsed.stopReason,
+          shouldContinue: effectiveShouldContinue,
+          stopReason: effectiveStopReason,
           confidence: reflectResult.parsed.confidence,
         },
         usage: {
+          resolvedModel: reflectResult.model,
           inputTokens: reflectResult.usage.inputTokens,
           outputTokens: reflectResult.usage.outputTokens,
           latencyMs: reflectResult.latencyMs,
@@ -363,25 +514,11 @@ async function executeTaskOnWorker(input: {
         },
       });
 
-      const phaseInputTokens =
-        planResult.usage.inputTokens + actResult.usage.inputTokens + reflectResult.usage.inputTokens;
-      const phaseOutputTokens =
-        planResult.usage.outputTokens + actResult.usage.outputTokens + reflectResult.usage.outputTokens;
-      const phaseCost =
-        planResult.costEstimateUsd + actResult.costEstimateUsd + reflectResult.costEstimateUsd;
-
-      totalInputTokens += phaseInputTokens;
-      totalOutputTokens += phaseOutputTokens;
-      totalCost += phaseCost;
-
-      await incrementRunCost(input.runId, phaseCost);
-
-      await updateTaskExecutionProgress({
-        taskExecutionId,
+      await applyUsage({
+        inputTokens: reflectResult.usage.inputTokens,
+        outputTokens: reflectResult.usage.outputTokens,
+        costEstimateUsd: reflectResult.costEstimateUsd,
         stepCountDelta: 1,
-        tokensInDelta: phaseInputTokens,
-        tokensOutDelta: phaseOutputTokens,
-        costDelta: phaseCost,
       });
 
       finalAnswer = actResult.parsed.answer;
@@ -416,8 +553,6 @@ async function executeTaskOnWorker(input: {
         remainingBudget: {
           ...memory.remainingBudget,
           steps: Math.max(0, run.config.budget.maxStepsPerTask - stepIndex),
-          maxTokensPerTask: Math.max(0, run.config.budget.maxTokensPerTask - totalInputTokens - totalOutputTokens),
-          hardCostCapUsd: Math.max(0, run.config.budget.hardCostCapUsd - totalCost),
         },
       };
 
@@ -433,10 +568,11 @@ async function executeTaskOnWorker(input: {
         data: {
           workerId: input.worker.id,
           taskId: input.task.taskId,
+          taskPhase: input.phase,
           stepIndex,
           phase: "reflect",
           stepId: reflectStepId,
-          shouldContinue: reflectResult.parsed.shouldContinue,
+          shouldContinue: effectiveShouldContinue,
         },
       });
 
@@ -450,8 +586,8 @@ async function executeTaskOnWorker(input: {
         break;
       }
 
-      if (!reflectResult.parsed.shouldContinue) {
-        stopReason = reflectResult.parsed.stopReason?.toLowerCase().includes("error")
+      if (!effectiveShouldContinue) {
+        stopReason = effectiveStopReason?.toLowerCase().includes("error")
           ? "error"
           : "completed";
         break;
@@ -473,6 +609,7 @@ async function executeTaskOnWorker(input: {
       finalAnswer,
       stepOutputs,
       citations: finalCitations,
+      model: input.worker.modelName,
       tokensIn: totalInputTokens,
       tokensOut: totalOutputTokens,
       cost: totalCost,
@@ -494,16 +631,18 @@ async function executeTaskOnWorker(input: {
 
     await updateRunStatus(input.runId, "evaluating");
 
-    const evaluation = await judgeTaskAttempt({
-      judgeModel: run.config.judgeModel,
-      task: input.task,
-      attempt,
-      chunks: input.chunks,
-      tieBreakEnabled: run.config.tieBreakEnabled,
-      deterministicGuards,
-    });
+    const evaluation = await input.judgeLimit(() =>
+      judgeTaskAttempt({
+        judgeModel: run.config.judgeModel,
+        task: input.task,
+        attempt,
+        chunks: input.chunks,
+        tieBreakEnabled: run.config.tieBreakEnabled,
+        deterministicGuards,
+      }),
+    );
 
-    await persistTaskEvaluation(input.runId, evaluation, run.config.judgeModel.model);
+    await persistTaskEvaluation(input.runId, evaluation, run.config.judgeModel.model, input.phase);
     await finalizeTaskExecution({
       taskExecutionId,
       status: evaluation.pass ? "passed" : "failed",
@@ -517,6 +656,7 @@ async function executeTaskOnWorker(input: {
       data: {
         workerId: input.worker.id,
         taskId: input.task.taskId,
+        phase: input.phase,
         taskExecutionId,
         pass: evaluation.pass,
         averageScore: evaluation.criterionScores.average,
@@ -551,7 +691,7 @@ async function executeTaskOnWorker(input: {
       stopReason: "error",
     });
 
-    await persistTaskEvaluation(input.runId, fallbackEvaluation, run.config.judgeModel.model);
+    await persistTaskEvaluation(input.runId, fallbackEvaluation, run.config.judgeModel.model, input.phase);
 
     await persistRunError({
       runId: input.runId,
@@ -560,6 +700,7 @@ async function executeTaskOnWorker(input: {
       message,
       details: {
         taskId: input.task.taskId,
+        phase: input.phase,
         workerId: input.worker.id,
       },
     });
@@ -570,6 +711,7 @@ async function executeTaskOnWorker(input: {
       message: `Task failed: ${input.task.name}`,
       data: {
         taskId: input.task.taskId,
+        phase: input.phase,
         workerId: input.worker.id,
         error: message,
       },
@@ -579,6 +721,75 @@ async function executeTaskOnWorker(input: {
   }
 }
 
+async function executePhase(input: {
+  runId: string;
+  phase: TaskPhase;
+  workers: PersistedWorker[];
+  tasks: GeneratedTask[];
+  chunks: ReturnType<typeof buildCorpusChunks>;
+  executionConcurrency: number;
+  judgeLimit: ReturnType<typeof pLimit>;
+}): Promise<TaskEvaluationResult[]> {
+  const evaluations: TaskEvaluationResult[] = [];
+  const taskQueue = [...input.tasks];
+  const activeWorkerCount = Math.max(
+    1,
+    Math.min(input.executionConcurrency, input.workers.length),
+  );
+  const activeWorkers = input.workers.slice(0, activeWorkerCount);
+
+  const workerPromises = activeWorkers.map(async (worker) => {
+    await updateWorkerStatus(worker.id, "idle");
+
+    while (taskQueue.length > 0) {
+      const task = taskQueue.shift();
+      if (!task) {
+        break;
+      }
+
+      if (await isRunCanceled(input.runId)) {
+        break;
+      }
+
+      await updateWorkerStatus(worker.id, "running");
+
+      await appendRunEvent(input.runId, "worker.started", {
+        runId: input.runId,
+        phase: "execution",
+        message: `${worker.workerLabel} started ${input.phase} task ${task.name}`,
+        data: {
+          workerId: worker.id,
+          workerLabel: worker.workerLabel,
+          taskId: task.taskId,
+          taskPhase: input.phase,
+        },
+      });
+
+      const evaluation = await executeTaskOnWorker({
+        runId: input.runId,
+        worker,
+        task,
+        chunks: input.chunks,
+        phase: input.phase,
+        judgeLimit: input.judgeLimit,
+      });
+
+      if (evaluation) {
+        evaluations.push(evaluation);
+      }
+
+      if (await isRunCanceled(input.runId)) {
+        break;
+      }
+
+      await updateWorkerStatus(worker.id, "idle");
+    }
+  });
+
+  await Promise.all(workerPromises);
+  return evaluations;
+}
+
 async function executeRun(runId: string): Promise<void> {
   const run = await getRun(runId);
 
@@ -586,9 +797,9 @@ async function executeRun(runId: string): Promise<void> {
     return;
   }
 
-  const evaluations: TaskEvaluationResult[] = [];
-
   try {
+    const judgeLimit = pLimit(Math.max(1, run.config.judgeConcurrency));
+
     await updateRunStatus(runId, "ingesting");
     await appendRunEvent(runId, "run.ingesting", {
       runId,
@@ -601,6 +812,19 @@ async function executeRun(runId: string): Promise<void> {
     });
 
     await persistIngestionArtifacts(runId, ingestion.artifacts);
+    await createOrGetSkillOptimizationSession({
+      runId,
+      sourceSkillOrigin: ingestion.skillText ? "site_skill" : "none",
+    });
+
+    if (ingestion.skillText) {
+      await persistSkillOptimizationArtifact({
+        runId,
+        artifactType: "baseline_skill",
+        content: ingestion.skillText,
+        contentHash: createHash("sha256").update(ingestion.skillText).digest("hex"),
+      });
+    }
 
     await appendRunEvent(runId, "run.ingestion_complete", {
       runId,
@@ -660,7 +884,7 @@ async function executeRun(runId: string): Promise<void> {
 
     await updateRunStatus(runId, "running");
 
-    const chunks = buildCorpusChunks(
+    const baselineChunks = buildCorpusChunks(
       ingestion.artifacts.map((artifact) => ({
         artifactType: artifact.artifactType,
         sourceUrl: artifact.sourceUrl,
@@ -668,69 +892,22 @@ async function executeRun(runId: string): Promise<void> {
       })),
     );
 
-    const taskQueue = [...tasks];
-
-    const workerPromises = workers.map(async (worker) => {
-      await updateWorkerStatus(worker.id, "idle");
-
-      while (taskQueue.length > 0) {
-        const task = taskQueue.shift();
-        if (!task) {
-          break;
-        }
-
-        if (await isRunCanceled(runId)) {
-          break;
-        }
-
-        await updateWorkerStatus(worker.id, "running");
-
-        await appendRunEvent(runId, "worker.started", {
-          runId,
-          phase: "execution",
-          message: `${worker.workerLabel} started task ${task.name}`,
-          data: {
-            workerId: worker.id,
-            workerLabel: worker.workerLabel,
-            taskId: task.taskId,
-          },
-        });
-
-        const evaluation = await executeTaskOnWorker({
-          runId,
-          worker,
-          task,
-          chunks,
-        });
-
-        if (evaluation) {
-          evaluations.push(evaluation);
-        }
-
-        if (await isRunCanceled(runId)) {
-          break;
-        }
-
-        await updateWorkerStatus(worker.id, "idle");
-      }
-
-      await updateWorkerStatus(worker.id, "done");
-
-      await appendRunEvent(runId, "worker.done", {
-        runId,
-        phase: "execution",
-        message: `${worker.workerLabel} finished assigned tasks.`,
-        data: {
-          workerId: worker.id,
-          workerLabel: worker.workerLabel,
-        },
-      });
+    await updateSkillOptimizationSession(runId, {
+      status: "running",
     });
 
-    await Promise.all(workerPromises);
+    const baselineEvaluations = await executePhase({
+      runId,
+      phase: "baseline",
+      workers,
+      tasks,
+      chunks: baselineChunks,
+      executionConcurrency: run.config.executionConcurrency,
+      judgeLimit,
+    });
 
     if (await isRunCanceled(runId)) {
-      const partialTotals = aggregateRunScores(evaluations);
+      const partialTotals = aggregateRunScores(baselineEvaluations);
       await finalizeRun(runId, "canceled", partialTotals);
       await appendRunEvent(runId, "run.canceled", {
         runId,
@@ -740,24 +917,185 @@ async function executeRun(runId: string): Promise<void> {
       return;
     }
 
+    const baselineTotals = aggregateRunScores(baselineEvaluations);
+    await updateSkillOptimizationSession(runId, {
+      baselineTotals,
+    });
+
+    const failedBaseline = baselineEvaluations.filter((evaluation) => !evaluation.pass);
+
+    if (failedBaseline.length === 0) {
+      await updateSkillOptimizationSession(runId, {
+        status: "skipped",
+        optimizedTotals: baselineTotals,
+        delta: {
+          passRateDelta: 0,
+          averageScoreDelta: 0,
+          passedTasksDelta: 0,
+          failedTasksDelta: 0,
+        },
+      });
+      await finalizeRun(runId, "completed", baselineTotals);
+      await appendRunEvent(runId, "run.completed", {
+        runId,
+        phase: "scoring",
+        message: "Run completed. Optimization skipped (no baseline failures).",
+        data: {
+          totalTasks: baselineTotals.totalTasks,
+          passedTasks: baselineTotals.passedTasks,
+          failedTasks: baselineTotals.failedTasks,
+          passRate: baselineTotals.passRate,
+          averageScore: baselineTotals.averageScore,
+          optimizationStatus: "skipped",
+        },
+      });
+      return;
+    }
+
+    if (!run.config.enableSkillOptimization) {
+      await updateSkillOptimizationSession(runId, {
+        status: "skipped",
+        optimizedTotals: baselineTotals,
+        delta: {
+          passRateDelta: 0,
+          averageScoreDelta: 0,
+          passedTasksDelta: 0,
+          failedTasksDelta: 0,
+        },
+      });
+      await finalizeRun(runId, "completed", baselineTotals);
+      await appendRunEvent(runId, "run.completed", {
+        runId,
+        phase: "scoring",
+        message: "Run completed with baseline results (optimization disabled).",
+        data: {
+          totalTasks: baselineTotals.totalTasks,
+          passedTasks: baselineTotals.passedTasks,
+          failedTasks: baselineTotals.failedTasks,
+          passRate: baselineTotals.passRate,
+          averageScore: baselineTotals.averageScore,
+          optimizationStatus: "skipped",
+        },
+      });
+      return;
+    }
+
     await updateRunStatus(runId, "evaluating");
 
-    const totals = aggregateRunScores(evaluations);
+    try {
+      const optimizedSkill = await generateOptimizedSkill({
+        model: run.config.judgeModel,
+        docsUrl: run.docsUrl,
+        existingSkillText: ingestion.skillText,
+        tasks,
+        failedEvaluations: failedBaseline,
+      });
 
-    await finalizeRun(runId, "completed", totals);
+      await persistSkillOptimizationArtifact({
+        runId,
+        artifactType: "optimized_skill",
+        content: optimizedSkill.optimizedSkillMarkdown,
+        contentHash: optimizedSkill.contentHash,
+      });
 
-    await appendRunEvent(runId, "run.completed", {
-      runId,
-      phase: "scoring",
-      message: "Run completed.",
-      data: {
-        totalTasks: totals.totalTasks,
-        passedTasks: totals.passedTasks,
-        failedTasks: totals.failedTasks,
-        passRate: totals.passRate,
-        averageScore: totals.averageScore,
-      },
-    });
+      await persistSkillOptimizationArtifact({
+        runId,
+        artifactType: "generation_output",
+        content: JSON.stringify({
+          notesCount: optimizedSkill.optimizationNotes.length,
+        }),
+        contentHash: createHash("sha256")
+          .update(JSON.stringify(optimizedSkill.optimizationNotes))
+          .digest("hex"),
+        metadata: {
+          optimizationNotes: optimizedSkill.optimizationNotes,
+        },
+      });
+
+      const optimizedArtifacts = ingestion.artifacts.filter((artifact) => artifact.artifactType !== "skill");
+      optimizedArtifacts.push({
+        artifactType: "skill",
+        sourceUrl: `${run.docsUrl}/skill.optimized.md`,
+        content: optimizedSkill.optimizedSkillMarkdown,
+        contentHash: optimizedSkill.contentHash,
+      });
+
+      const optimizedChunks = buildCorpusChunks(
+        optimizedArtifacts.map((artifact) => ({
+          artifactType: artifact.artifactType,
+          sourceUrl: artifact.sourceUrl,
+          content: artifact.content,
+        })),
+      );
+
+      const optimizedEvaluations = await executePhase({
+        runId,
+        phase: "optimized",
+        workers,
+        tasks,
+        chunks: optimizedChunks,
+        executionConcurrency: run.config.executionConcurrency,
+        judgeLimit,
+      });
+
+      const optimizedTotals = aggregateRunScores(optimizedEvaluations);
+      const delta = {
+        passRateDelta: Number((optimizedTotals.passRate - baselineTotals.passRate).toFixed(4)),
+        averageScoreDelta: Number((optimizedTotals.averageScore - baselineTotals.averageScore).toFixed(4)),
+        passedTasksDelta: optimizedTotals.passedTasks - baselineTotals.passedTasks,
+        failedTasksDelta: optimizedTotals.failedTasks - baselineTotals.failedTasks,
+      };
+
+      await updateSkillOptimizationSession(runId, {
+        status: "completed",
+        optimizedTotals,
+        delta,
+      });
+
+      await finalizeRun(runId, "completed", optimizedTotals);
+
+      await appendRunEvent(runId, "run.completed", {
+        runId,
+        phase: "scoring",
+        message: "Run completed with baseline + optimized phases.",
+        data: {
+          totalTasks: optimizedTotals.totalTasks,
+          passedTasks: optimizedTotals.passedTasks,
+          failedTasks: optimizedTotals.failedTasks,
+          passRate: optimizedTotals.passRate,
+          averageScore: optimizedTotals.averageScore,
+          optimizationDelta: delta,
+        },
+      });
+    } catch (optimizationError) {
+      const optimizationMessage = asErrorMessage(optimizationError);
+      await updateSkillOptimizationSession(runId, {
+        status: "error",
+        errorMessage: optimizationMessage,
+      });
+      await persistRunError({
+        runId,
+        phase: "evaluation",
+        errorCode: "SKILL_OPTIMIZATION_ERROR",
+        message: optimizationMessage,
+      });
+
+      await finalizeRun(runId, "completed", baselineTotals);
+      await appendRunEvent(runId, "run.completed", {
+        runId,
+        phase: "scoring",
+        message: "Run completed with baseline results (optimization failed).",
+        data: {
+          totalTasks: baselineTotals.totalTasks,
+          passedTasks: baselineTotals.passedTasks,
+          failedTasks: baselineTotals.failedTasks,
+          passRate: baselineTotals.passRate,
+          averageScore: baselineTotals.averageScore,
+          optimizationStatus: "error",
+          optimizationError: optimizationMessage,
+        },
+      });
+    }
   } catch (error) {
     const message = asErrorMessage(error);
 

@@ -6,9 +6,9 @@ import type { GeneratedTask } from "@/lib/tasks/types";
 import type { AgentMemoryState } from "@/lib/runs/types";
 
 const citationSchema = z.object({
-  source: z.string().min(1),
+  source: z.string().min(1).default("unknown"),
   snippetHash: z.string().optional(),
-  excerpt: z.string().min(1),
+  excerpt: z.string().default(""),
   startOffset: z.number().int().nonnegative().optional(),
   endOffset: z.number().int().nonnegative().optional(),
 });
@@ -16,28 +16,47 @@ const citationSchema = z.object({
 const agentAnswerSchema = z.object({
   answer: z.string().min(1),
   steps: z.array(z.string().min(1)).min(1),
-  citations: z.array(citationSchema),
+  citations: z.array(citationSchema).default([]),
 });
 
+const planItemSchema = z
+  .union([z.string(), z.record(z.string(), z.unknown())])
+  .transform((value) => {
+    if (typeof value === "string") {
+      return value.trim();
+    }
+
+    const keys = ["item", "action", "step", "details", "title"];
+    for (const key of keys) {
+      const field = value[key];
+      if (typeof field === "string" && field.trim()) {
+        return field.trim();
+      }
+    }
+
+    return JSON.stringify(value).slice(0, 280);
+  })
+  .pipe(z.string().min(1));
+
 const planStepSchema = z.object({
-  planItems: z.array(z.string().min(1)).min(1),
-  rationale: z.string().min(1),
+  planItems: z.array(planItemSchema).default(["Gather required documentation evidence."]),
+  rationale: z.string().default(""),
 });
 
 const actStepSchema = z.object({
-  answer: z.string().min(1),
-  stepOutput: z.string().min(1),
-  citations: z.array(citationSchema),
-  done: z.boolean(),
+  answer: z.string().default(""),
+  stepOutput: z.string().default(""),
+  citations: z.array(citationSchema).default([]),
+  done: z.boolean().default(false),
   doneReason: z.string().optional(),
   discoveredFacts: z.array(z.string()).default([]),
 });
 
 const reflectStepSchema = z.object({
-  shouldContinue: z.boolean(),
-  summary: z.string().min(1),
+  shouldContinue: z.boolean().default(false),
+  summary: z.string().default(""),
   planUpdates: z.array(z.string()).default([]),
-  confidence: z.number().min(0).max(1),
+  confidence: z.number().min(0).max(1).default(0),
   stopReason: z.string().optional(),
 });
 
@@ -49,6 +68,7 @@ export interface AgentTaskAttempt {
   steps: string[];
   citations: EvidenceCitation[];
   rawOutput: string;
+  model: string;
   usage: ModelUsage;
   latencyMs: number;
   costEstimateUsd: number;
@@ -57,6 +77,7 @@ export interface AgentTaskAttempt {
 export interface AgentPhaseResponse<T> {
   parsed: T;
   text: string;
+  model: string;
   usage: ModelUsage;
   latencyMs: number;
   costEstimateUsd: number;
@@ -122,6 +143,7 @@ export async function runPlanningStep(input: {
   return {
     parsed: response.parsed,
     text: response.text,
+    model: response.model,
     usage: response.usage,
     latencyMs: response.latencyMs,
     costEstimateUsd: estimateCostUsd(response.usage),
@@ -145,7 +167,7 @@ export async function runActStep(input: {
       {
         role: "system",
         content:
-          "You are a documentation-only execution agent. Use only provided context. Always provide citations.",
+          "You are a documentation-only execution agent. Use only provided context. Always provide citations. Mark done=true only when the output is implementation-complete and runnable for the task requirements.",
       },
       {
         role: "user",
@@ -158,6 +180,7 @@ export async function runActStep(input: {
           "Context:",
           context,
           "",
+          "If evidence is missing, provide a concrete next step and keep done=false.",
           "Return JSON keys: answer, stepOutput, citations, done, doneReason, discoveredFacts.",
         ].join("\n"),
       },
@@ -167,6 +190,7 @@ export async function runActStep(input: {
   return {
     parsed: response.parsed,
     text: response.text,
+    model: response.model,
     usage: response.usage,
     latencyMs: response.latencyMs,
     costEstimateUsd: estimateCostUsd(response.usage),
@@ -209,6 +233,7 @@ export async function runReflectStep(input: {
   return {
     parsed: response.parsed,
     text: response.text,
+    model: response.model,
     usage: response.usage,
     latencyMs: response.latencyMs,
     costEstimateUsd: estimateCostUsd(response.usage),
@@ -263,6 +288,7 @@ export async function runAgentTask(input: {
     steps: response.parsed.steps,
     citations,
     rawOutput: response.text,
+    model: response.model,
     usage: response.usage,
     latencyMs: response.latencyMs,
     costEstimateUsd: estimateCostUsd(response.usage),

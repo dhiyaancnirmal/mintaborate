@@ -35,8 +35,30 @@ function chunkText(content: string, maxChunkLength = 1200): string[] {
 
   const chunks: string[] = [];
   let current = "";
+  const pushWithHardSplit = (text: string): void => {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    for (let start = 0; start < trimmed.length; start += maxChunkLength) {
+      const part = trimmed.slice(start, start + maxChunkLength).trim();
+      if (part) {
+        chunks.push(part);
+      }
+    }
+  };
 
   for (const paragraph of paragraphs) {
+    if (paragraph.length > maxChunkLength) {
+      if (current) {
+        chunks.push(current);
+        current = "";
+      }
+      pushWithHardSplit(paragraph);
+      continue;
+    }
+
     if (!current) {
       current = paragraph;
       continue;
@@ -56,7 +78,7 @@ function chunkText(content: string, maxChunkLength = 1200): string[] {
   }
 
   if (chunks.length === 0 && content.trim().length > 0) {
-    chunks.push(content.trim().slice(0, maxChunkLength));
+    pushWithHardSplit(content);
   }
 
   return chunks;
@@ -68,16 +90,23 @@ function hashSnippet(text: string): string {
 
 export function buildCorpusChunks(artifacts: RetrievalArtifact[]): CorpusChunk[] {
   const chunks: CorpusChunk[] = [];
+  const seenChunkHashes = new Set<string>();
 
   for (const artifact of artifacts) {
     const artifactChunks = chunkText(artifact.content);
 
     for (const chunk of artifactChunks) {
+      const snippetHash = hashSnippet(chunk);
+      if (seenChunkHashes.has(snippetHash)) {
+        continue;
+      }
+      seenChunkHashes.add(snippetHash);
+
       chunks.push({
         sourceUrl: artifact.sourceUrl,
         artifactType: artifact.artifactType,
         text: chunk,
-        snippetHash: hashSnippet(chunk),
+        snippetHash,
       });
     }
   }

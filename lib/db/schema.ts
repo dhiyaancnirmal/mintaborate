@@ -69,6 +69,7 @@ export const taskEvaluations = sqliteTable(
     id: integer("id", { mode: "number" }).primaryKey({ autoIncrement: true }),
     runId: text("run_id").notNull(),
     taskId: text("task_id").notNull(),
+    phase: text("phase").notNull().default("baseline"),
     criterionScoresJson: text("criterion_scores_json").notNull(),
     pass: integer("pass", { mode: "boolean" }).notNull(),
     failureClass: text("failure_class"),
@@ -91,6 +92,7 @@ export const runEvents = sqliteTable(
     createdAt: integer("created_at").notNull(),
   },
   (table) => [
+    uniqueIndex("run_events_run_seq_unq").on(table.runId, table.seq),
     index("run_events_run_seq_idx").on(table.runId, table.seq),
     index("run_events_run_id_id_idx").on(table.runId, table.id),
   ],
@@ -135,6 +137,7 @@ export const taskExecutions = sqliteTable(
     id: integer("id", { mode: "number" }).primaryKey({ autoIncrement: true }),
     runId: text("run_id").notNull(),
     taskId: text("task_id").notNull(),
+    phase: text("phase").notNull().default("baseline"),
     workerId: integer("worker_id"),
     status: text("status").notNull(),
     stepCount: integer("step_count").notNull().default(0),
@@ -147,8 +150,46 @@ export const taskExecutions = sqliteTable(
   },
   (table) => [
     index("task_executions_run_id_idx").on(table.runId),
+    index("task_executions_run_phase_idx").on(table.runId, table.phase),
     index("task_executions_task_id_idx").on(table.taskId),
     index("task_executions_worker_id_idx").on(table.workerId),
+  ],
+);
+
+export const skillOptimizationSessions = sqliteTable(
+  "skill_optimization_sessions",
+  {
+    id: integer("id", { mode: "number" }).primaryKey({ autoIncrement: true }),
+    runId: text("run_id").notNull(),
+    status: text("status").notNull(),
+    sourceSkillOrigin: text("source_skill_origin").notNull(),
+    baselineSummaryJson: text("baseline_summary_json"),
+    optimizedSummaryJson: text("optimized_summary_json"),
+    deltaJson: text("delta_json"),
+    errorMessage: text("error_message"),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("skill_optimization_sessions_run_unq").on(table.runId),
+    index("skill_optimization_sessions_status_idx").on(table.status),
+  ],
+);
+
+export const skillOptimizationArtifacts = sqliteTable(
+  "skill_optimization_artifacts",
+  {
+    id: integer("id", { mode: "number" }).primaryKey({ autoIncrement: true }),
+    sessionId: integer("session_id").notNull(),
+    artifactType: text("artifact_type").notNull(),
+    content: text("content").notNull(),
+    contentHash: text("content_hash").notNull(),
+    metadataJson: text("metadata_json"),
+    createdAt: integer("created_at").notNull(),
+  },
+  (table) => [
+    index("skill_optimization_artifacts_session_idx").on(table.sessionId),
+    index("skill_optimization_artifacts_type_idx").on(table.artifactType),
   ],
 );
 

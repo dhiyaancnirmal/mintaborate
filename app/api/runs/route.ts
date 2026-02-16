@@ -2,6 +2,8 @@ import { z } from "zod";
 import { createRun, listRuns } from "@/lib/runs/service";
 import { startRunInBackground } from "@/lib/execution/orchestrator";
 
+const providerEnum = z.enum(["openai", "anthropic", "openai-compatible", "gemini", "openrouter"]);
+
 const taskSchema = z.object({
   name: z.string().min(1),
   description: z.string().min(1),
@@ -20,7 +22,7 @@ const taskSchema = z.object({
 });
 
 const workerAssignmentSchema = z.object({
-  provider: z.enum(["openai", "anthropic", "openai-compatible"]),
+  provider: providerEnum,
   model: z.string().min(1),
   quantity: z.number().int().min(1).max(32),
   temperature: z.number().min(0).max(2).optional(),
@@ -36,6 +38,7 @@ const createRunSchema = z.object({
   taskCount: z.number().int().min(1).max(200).optional(),
   executionConcurrency: z.number().int().min(1).max(20).optional(),
   judgeConcurrency: z.number().int().min(1).max(20).optional(),
+  enableSkillOptimization: z.boolean().optional(),
   tieBreakEnabled: z.boolean().optional(),
   maxTokensPerTask: z.number().int().min(256).max(32000).optional(),
   hardCostCapUsd: z.number().min(0).max(10000).optional(),
@@ -49,7 +52,7 @@ const createRunSchema = z.object({
     .optional(),
   runModel: z
     .object({
-      provider: z.enum(["openai", "anthropic", "openai-compatible"]).optional(),
+      provider: providerEnum.optional(),
       model: z.string().optional(),
       temperature: z.number().min(0).max(2).optional(),
       maxTokens: z.number().int().min(1).max(32000).optional(),
@@ -62,7 +65,7 @@ const createRunSchema = z.object({
     .optional(),
   judgeModel: z
     .object({
-      provider: z.enum(["openai", "anthropic", "openai-compatible"]).optional(),
+      provider: providerEnum.optional(),
       model: z.string().optional(),
       temperature: z.number().min(0).max(2).optional(),
       maxTokens: z.number().int().min(1).max(32000).optional(),

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
@@ -10,7 +11,6 @@ import {
   Button,
   Input,
   Select,
-  Collapsible,
 } from "@/components/ui/primitives";
 import { isActiveStatus } from "@/lib/ui/format";
 
@@ -26,8 +26,10 @@ type CreateRunResponse = {
   runId: string;
 };
 
+type Provider = "openai" | "anthropic" | "openai-compatible" | "gemini" | "openrouter";
+
 type AssignmentRow = {
-  provider: "openai" | "anthropic" | "openai-compatible";
+  provider: Provider;
   model: string;
   quantity: number;
 };
@@ -38,40 +40,74 @@ type TaskRow = {
   expectedSignals: string;
 };
 
-const defaultPayload = {
-  docsUrl: "https://docs.anthropic.com",
-  taskCount: 10,
-  workerCount: 3,
-  maxStepsPerTask: 8,
-  judgeConcurrency: 3,
+const PROVIDER_LABELS: Record<Provider, string> = {
+  openai: "OpenAI",
+  anthropic: "Anthropic",
+  "openai-compatible": "OpenAI-Compatible",
+  gemini: "Google Gemini",
+  openrouter: "OpenRouter",
 };
+
+const MODEL_OPTIONS: Record<Provider, string[]> = {
+  openai: ["gpt-5-mini", "gpt-5", "gpt-4.1-mini"],
+  anthropic: ["claude-sonnet-4-5", "claude-opus-4-1", "claude-3-5-sonnet-latest"],
+  "openai-compatible": [
+    "moonshotai/kimi-k2-instruct-0905",
+    "openai/gpt-5-mini",
+    "anthropic/claude-sonnet-4-5",
+    "google/gemini-2.5-pro",
+  ],
+  gemini: ["gemini-2.5-pro", "gemini-2.5-flash"],
+  openrouter: ["openrouter/free", "openrouter/auto", "anthropic/claude-sonnet-4-5"],
+};
+
+const defaultPayload = {
+  docsUrl: "https://docs.cdp.coinbase.com/",
+  taskCount: 2,
+  maxStepsPerTask: 8,
+  executionConcurrency: 3,
+  judgeConcurrency: 3,
+  hardCostCapUsd: 10,
+};
+
+function getDefaultModel(provider: Provider): string {
+  return MODEL_OPTIONS[provider][0] ?? "";
+}
 
 export default function HomeClient() {
   const router = useRouter();
   const [docsUrl, setDocsUrl] = useState(defaultPayload.docsUrl);
   const [taskCount, setTaskCount] = useState(defaultPayload.taskCount);
-  const [workerCount, setWorkerCount] = useState(defaultPayload.workerCount);
   const [maxStepsPerTask, setMaxStepsPerTask] = useState(defaultPayload.maxStepsPerTask);
+  const [executionConcurrency, setExecutionConcurrency] = useState(defaultPayload.executionConcurrency);
+  const [judgeConcurrency, setJudgeConcurrency] = useState(defaultPayload.judgeConcurrency);
+  const [hardCostCapUsd, setHardCostCapUsd] = useState(defaultPayload.hardCostCapUsd);
+  const [enableSkillOptimization, setEnableSkillOptimization] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [deletingRunId, setDeletingRunId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [assignments, setAssignments] = useState<AssignmentRow[]>([
     {
-      provider: "openai",
-      model: "gpt-5-mini",
-      quantity: defaultPayload.workerCount,
+      provider: "openai-compatible",
+      model: "moonshotai/kimi-k2-instruct-0905",
+      quantity: 3,
     },
   ]);
   const [taskRows, setTaskRows] = useState<TaskRow[]>([
     {
-      name: "Authenticate API requests",
-      description: "Find exactly how to authenticate requests and produce a working first call.",
-      expectedSignals: "api key, authorization header, example request",
+      name: "Server Wallet: create + default address",
+      description:
+        "Write a Node/TS script using @coinbase/coinbase-sdk that initializes CDP from a JSON key file, creates a wallet, and prints the wallet default address.",
+      expectedSignals:
+        "@coinbase/coinbase-sdk, Coinbase.configureFromJson, Wallet.create, getDefaultAddress, networkId",
     },
     {
-      name: "Set up webhook listener",
-      description: "Implement webhook configuration and signature verification correctly.",
-      expectedSignals: "webhook endpoint, signature validation, retry behavior",
+      name: "Server Wallet: faucet + transfer + wait",
+      description:
+        "Extend the script to fund the wallet on Base Sepolia via wallet.faucet() with wait, then create a second wallet and transfer testnet ETH using createTransfer, wait, and a completion status check.",
+      expectedSignals:
+        "faucet, faucetTransaction.wait, createTransfer, transfer.wait, getStatus, base-sepolia",
     },
   ]);
 
@@ -99,10 +135,29 @@ export default function HomeClient() {
     };
   }, [runs]);
 
+  const workerCount = useMemo(
+    () => assignments.reduce((sum, assignment) => sum + Math.max(0, assignment.quantity), 0),
+    [assignments],
+  );
+
   function updateAssignment(index: number, patch: Partial<AssignmentRow>) {
     setAssignments((prev) => {
       const next = [...prev];
-      next[index] = { ...next[index], ...patch };
+      const current = next[index];
+      if (!current) {
+        return prev;
+      }
+
+      const updated: AssignmentRow = {
+        ...current,
+        ...patch,
+      };
+
+      if (patch.provider && patch.provider !== current.provider) {
+        updated.model = getDefaultModel(patch.provider);
+      }
+
+      next[index] = updated;
       return next;
     });
   }
@@ -139,17 +194,25 @@ export default function HomeClient() {
             .filter(Boolean),
         }));
 
+      const normalizedWorkerCount = normalizedAssignments.reduce(
+        (sum, assignment) => sum + assignment.quantity,
+        0,
+      );
+
       const res = await fetch("/api/runs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           docsUrl,
           taskCount,
-          judgeConcurrency: defaultPayload.judgeConcurrency,
+          executionConcurrency,
+          judgeConcurrency,
+          enableSkillOptimization,
+          hardCostCapUsd,
           maxStepsPerTask,
           tasks: normalizedTasks,
           workers: {
-            workerCount,
+            workerCount: normalizedWorkerCount,
             assignments: normalizedAssignments,
           },
         }),
@@ -170,107 +233,58 @@ export default function HomeClient() {
     }
   }
 
+  async function onDeleteRun(runId: string) {
+    const confirmed = window.confirm("Delete this run permanently?");
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingRunId(runId);
+    setError(null);
+
+    try {
+      const res = await fetch(`/api/runs/${runId}`, { method: "DELETE" });
+      if (!res.ok) {
+        const payload = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(payload?.error ?? "Failed to delete run");
+      }
+      await loadRuns();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete run");
+    } finally {
+      setDeletingRunId(null);
+    }
+  }
+
   return (
     <main style={{ minHeight: "100vh" }}>
-      {/* Header Bar */}
       <header
         style={{
           display: "flex",
           alignItems: "center",
-          justifyContent: "space-between",
-          height: 48,
+          justifyContent: "flex-start",
+          height: 56,
           padding: "0 24px",
           borderBottom: "1px solid var(--border-default)",
           background: "var(--surface-0)",
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span
-            style={{
-              display: "inline-block",
-              width: 6,
-              height: 6,
-              borderRadius: "50%",
-              background: "var(--accent)",
-            }}
-          />
-          <span
-            style={{
-              fontFamily: "var(--font-mono)",
-              fontSize: 13,
-              fontWeight: 600,
-              textTransform: "uppercase",
-              letterSpacing: "0.1em",
-              color: "var(--text-primary)",
-            }}
-          >
-            Mintaborate
-          </span>
-        </div>
-        <a
-          href="https://mintlify.com"
-          target="_blank"
-          rel="noreferrer"
+        <span
           style={{
-            fontFamily: "var(--font-mono)",
-            fontSize: 11,
-            fontWeight: 500,
-            textTransform: "uppercase",
-            letterSpacing: "0.06em",
-            color: "var(--text-secondary)",
-            textDecoration: "none",
-            padding: "6px 12px",
-            border: "1px solid var(--border-emphasis)",
-            borderRadius: "var(--radius)",
-            transition: "color 0.15s",
-          }}
-        >
-          Mintlify
-        </a>
-      </header>
-
-      {/* Hero Section */}
-      <section
-        style={{
-          textAlign: "center",
-          padding: "56px 24px 32px",
-          maxWidth: 720,
-          margin: "0 auto",
-        }}
-      >
-        <MonoLabel>Agent Effectiveness Simulation</MonoLabel>
-        <h1
-          style={{
-            marginTop: 12,
-            fontSize: 40,
+            fontFamily: "inherit",
+            fontSize: 18,
             fontWeight: 600,
-            lineHeight: 1.15,
+            letterSpacing: "0.01em",
             color: "var(--text-primary)",
           }}
         >
-          Measure the{" "}
-          <span style={{ color: "var(--accent)", fontStyle: "italic" }}>
-            implementation outcome
-          </span>
-        </h1>
-        <p
-          style={{
-            marginTop: 12,
-            fontSize: 14,
-            color: "var(--text-secondary)",
-            lineHeight: 1.6,
-          }}
-        >
-          Simulate real implementation workflows, inspect where traces fail,
-          and get diagnostics-first evaluation.
-        </p>
-      </section>
+          Mintaborate
+        </span>
+      </header>
 
-      {/* Config Form */}
-      <section style={{ maxWidth: 760, margin: "0 auto", padding: "0 24px" }}>
+      <section style={{ maxWidth: 900, margin: "20px auto 0", padding: "0 24px" }}>
         <Card variant="elevated">
           <form onSubmit={onSubmit}>
-            {/* Row 1: URL + Submit */}
             <div
               style={{
                 display: "grid",
@@ -290,17 +304,12 @@ export default function HomeClient() {
                 type="submit"
                 variant="primary"
                 disabled={creating}
-                style={{
-                  height: 42,
-                  whiteSpace: "nowrap",
-                  opacity: creating ? 0.6 : 1,
-                }}
+                style={{ height: 42, whiteSpace: "nowrap", opacity: creating ? 0.6 : 1 }}
               >
-                {creating ? "Creating..." : "Start Simulation"}
+                {creating ? "Creating..." : "Start Run"}
               </Button>
             </div>
 
-            {/* Row 2: Number inputs */}
             <div
               style={{
                 display: "grid",
@@ -318,12 +327,10 @@ export default function HomeClient() {
                 onChange={(e) => setTaskCount(Number(e.target.value))}
               />
               <Input
-                label="Workers"
+                label="Worker Count"
                 type="number"
-                min={1}
-                max={12}
                 value={workerCount}
-                onChange={(e) => setWorkerCount(Number(e.target.value))}
+                readOnly
               />
               <Input
                 label="Max Steps"
@@ -335,189 +342,243 @@ export default function HomeClient() {
               />
             </div>
 
-            {/* Worker Model Assignments */}
-            <div style={{ marginTop: 16 }}>
-              <Collapsible title="Worker Model Assignments" defaultOpen>
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {assignments.map((assignment, index) => (
-                    <div
-                      key={`${assignment.model}-${index}`}
-                      style={{
-                        display: "grid",
-                        gridTemplateColumns: "140px 1fr 80px auto",
-                        gap: 8,
-                        alignItems: "end",
-                      }}
-                    >
-                      <Select
-                        value={assignment.provider}
-                        onChange={(e) =>
-                          updateAssignment(index, {
-                            provider: e.target.value as AssignmentRow["provider"],
-                          })
-                        }
-                      >
-                        <option value="openai">openai</option>
-                        <option value="anthropic">anthropic</option>
-                        <option value="openai-compatible">openai-compatible</option>
-                      </Select>
-                      <input
-                        style={{
-                          padding: "10px 12px",
-                          background: "var(--surface-3)",
-                          border: "1px solid var(--border-default)",
-                          borderRadius: "var(--radius)",
-                          color: "var(--text-primary)",
-                          fontSize: 13,
-                          fontFamily: "var(--font-mono)",
-                          outline: "none",
-                        }}
-                        value={assignment.model}
-                        onChange={(e) => updateAssignment(index, { model: e.target.value })}
-                        placeholder="model name"
-                      />
-                      <input
-                        type="number"
-                        min={1}
-                        max={12}
-                        style={{
-                          padding: "10px 12px",
-                          background: "var(--surface-3)",
-                          border: "1px solid var(--border-default)",
-                          borderRadius: "var(--radius)",
-                          color: "var(--text-primary)",
-                          fontSize: 13,
-                          outline: "none",
-                        }}
-                        value={assignment.quantity}
-                        onChange={(e) => updateAssignment(index, { quantity: Number(e.target.value) })}
-                      />
-                      <Button
-                        type="button"
-                        variant="danger"
-                        style={{ padding: "8px 10px", fontSize: 11 }}
-                        onClick={() =>
-                          setAssignments((prev) => prev.filter((_, i) => i !== index))
-                        }
-                        disabled={assignments.length <= 1}
-                      >
-                        Remove
-                      </Button>
-                    </div>
-                  ))}
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    style={{ alignSelf: "flex-start", marginTop: 4 }}
-                    onClick={() =>
-                      setAssignments((prev) => [
-                        ...prev,
-                        { provider: "openai", model: "gpt-5-mini", quantity: 1 },
-                      ])
-                    }
-                  >
-                    + Add Assignment
-                  </Button>
-                </div>
-              </Collapsible>
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                marginTop: 12,
+                fontSize: 13,
+                color: "var(--text-secondary)",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={enableSkillOptimization}
+                onChange={(e) => setEnableSkillOptimization(e.target.checked)}
+              />
+              <span>Enable skill optimization pass (slower)</span>
+            </label>
+
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr 1fr",
+                gap: 12,
+                marginTop: 12,
+              }}
+            >
+              <Input
+                label="Execution Concurrency"
+                type="number"
+                min={1}
+                max={20}
+                value={executionConcurrency}
+                onChange={(e) => setExecutionConcurrency(Number(e.target.value))}
+              />
+              <Input
+                label="Judge Concurrency"
+                type="number"
+                min={1}
+                max={20}
+                value={judgeConcurrency}
+                onChange={(e) => setJudgeConcurrency(Number(e.target.value))}
+              />
+              <Input
+                label="Hard Cost Cap (USD)"
+                type="number"
+                min={0}
+                max={10000}
+                step="0.5"
+                value={hardCostCapUsd}
+                onChange={(e) => setHardCostCapUsd(Number(e.target.value))}
+              />
             </div>
 
-            {/* User-Defined Tasks */}
-            <div style={{ marginTop: 12 }}>
-              <Collapsible title="User-Defined Tasks">
-                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                  {taskRows.map((task, index) => (
-                    <div
-                      key={`${task.name}-${index}`}
+            <div style={{ marginTop: 16 }}>
+              <MonoLabel>Model Assignments</MonoLabel>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+                {assignments.map((assignment, index) => (
+                  <div
+                    key={`${assignment.provider}-${assignment.model}-${index}`}
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "160px 1fr 90px auto",
+                      gap: 8,
+                      alignItems: "end",
+                    }}
+                  >
+                    <Select
+                      value={assignment.provider}
+                      onChange={(e) =>
+                        updateAssignment(index, {
+                          provider: e.target.value as Provider,
+                        })
+                      }
+                    >
+                      {Object.entries(PROVIDER_LABELS).map(([value, label]) => (
+                        <option key={value} value={value}>
+                          {label}
+                        </option>
+                      ))}
+                    </Select>
+
+                    <Select
+                      value={assignment.model}
+                      onChange={(e) =>
+                        updateAssignment(index, {
+                          model: e.target.value,
+                        })
+                      }
+                    >
+                      {MODEL_OPTIONS[assignment.provider].map((model) => (
+                        <option key={model} value={model}>
+                          {model}
+                        </option>
+                      ))}
+                    </Select>
+
+                    <Input
+                      type="number"
+                      min={1}
+                      max={12}
+                      value={assignment.quantity}
+                      onChange={(e) =>
+                        updateAssignment(index, {
+                          quantity: Number(e.target.value),
+                        })
+                      }
+                    />
+
+                    <Button
+                      type="button"
+                      variant="danger"
+                      style={{ height: 40 }}
+                      onClick={() =>
+                        setAssignments((prev) => prev.filter((_, i) => i !== index))
+                      }
+                      disabled={assignments.length <= 1}
+                    >
+                      Remove
+                    </Button>
+                  </div>
+                ))}
+
+                <Button
+                  type="button"
+                  variant="secondary"
+                  style={{ alignSelf: "flex-start", marginTop: 4 }}
+                  onClick={() =>
+                    setAssignments((prev) => [
+                      ...prev,
+                      {
+                        provider: "openrouter",
+                        model: getDefaultModel("openrouter"),
+                        quantity: 1,
+                      },
+                    ])
+                  }
+                >
+                  Add Model
+                </Button>
+              </div>
+            </div>
+
+            <div style={{ marginTop: 16 }}>
+              <MonoLabel>User-Defined Tasks</MonoLabel>
+              <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 8 }}>
+                {taskRows.map((task, index) => (
+                  <div
+                    key={`${task.name}-${index}`}
+                    style={{
+                      padding: 12,
+                      border: "1px solid var(--border-default)",
+                      borderRadius: "var(--radius)",
+                      background: "var(--surface-2)",
+                    }}
+                  >
+                    <input
                       style={{
-                        padding: 12,
+                        display: "block",
+                        width: "100%",
+                        padding: "8px 10px",
+                        marginBottom: 8,
+                        background: "var(--surface-3)",
                         border: "1px solid var(--border-default)",
                         borderRadius: "var(--radius)",
-                        background: "var(--surface-2)",
+                        color: "var(--text-primary)",
+                        fontSize: 13,
+                        outline: "none",
                       }}
+                      value={task.name}
+                      onChange={(e) => updateTask(index, { name: e.target.value })}
+                      placeholder="Task name"
+                    />
+                    <textarea
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        padding: "8px 10px",
+                        marginBottom: 8,
+                        background: "var(--surface-3)",
+                        border: "1px solid var(--border-default)",
+                        borderRadius: "var(--radius)",
+                        color: "var(--text-primary)",
+                        fontSize: 13,
+                        outline: "none",
+                        resize: "vertical",
+                        fontFamily: "inherit",
+                      }}
+                      value={task.description}
+                      onChange={(e) => updateTask(index, { description: e.target.value })}
+                      rows={2}
+                      placeholder="Task description"
+                    />
+                    <input
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        padding: "8px 10px",
+                        marginBottom: 8,
+                        background: "var(--surface-3)",
+                        border: "1px solid var(--border-default)",
+                        borderRadius: "var(--radius)",
+                        color: "var(--text-primary)",
+                        fontSize: 13,
+                        outline: "none",
+                      }}
+                      value={task.expectedSignals}
+                      onChange={(e) => updateTask(index, { expectedSignals: e.target.value })}
+                      placeholder="Expected signals (comma separated)"
+                    />
+                    <Button
+                      type="button"
+                      variant="danger"
+                      style={{ height: 40 }}
+                      onClick={() =>
+                        setTaskRows((prev) => prev.filter((_, i) => i !== index))
+                      }
+                      disabled={taskRows.length <= 1}
                     >
-                      <input
-                        style={{
-                          display: "block",
-                          width: "100%",
-                          padding: "8px 10px",
-                          marginBottom: 8,
-                          background: "var(--surface-3)",
-                          border: "1px solid var(--border-default)",
-                          borderRadius: "var(--radius)",
-                          color: "var(--text-primary)",
-                          fontSize: 12,
-                          outline: "none",
-                        }}
-                        value={task.name}
-                        onChange={(e) => updateTask(index, { name: e.target.value })}
-                        placeholder="Task name"
-                      />
-                      <textarea
-                        style={{
-                          display: "block",
-                          width: "100%",
-                          padding: "8px 10px",
-                          marginBottom: 8,
-                          background: "var(--surface-3)",
-                          border: "1px solid var(--border-default)",
-                          borderRadius: "var(--radius)",
-                          color: "var(--text-primary)",
-                          fontSize: 12,
-                          outline: "none",
-                          resize: "vertical",
-                          fontFamily: "inherit",
-                        }}
-                        value={task.description}
-                        onChange={(e) => updateTask(index, { description: e.target.value })}
-                        rows={2}
-                        placeholder="Task description"
-                      />
-                      <input
-                        style={{
-                          display: "block",
-                          width: "100%",
-                          padding: "8px 10px",
-                          marginBottom: 8,
-                          background: "var(--surface-3)",
-                          border: "1px solid var(--border-default)",
-                          borderRadius: "var(--radius)",
-                          color: "var(--text-primary)",
-                          fontSize: 12,
-                          outline: "none",
-                        }}
-                        value={task.expectedSignals}
-                        onChange={(e) => updateTask(index, { expectedSignals: e.target.value })}
-                        placeholder="Expected signals (comma separated)"
-                      />
-                      <Button
-                        type="button"
-                        variant="danger"
-                        style={{ fontSize: 11, padding: "6px 10px" }}
-                        onClick={() =>
-                          setTaskRows((prev) => prev.filter((_, i) => i !== index))
-                        }
-                        disabled={taskRows.length <= 1}
-                      >
-                        Remove Task
-                      </Button>
-                    </div>
-                  ))}
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    style={{ alignSelf: "flex-start" }}
-                    onClick={() =>
-                      setTaskRows((prev) => [
-                        ...prev,
-                        { name: "", description: "", expectedSignals: "" },
-                      ])
-                    }
-                  >
-                    + Add Task
-                  </Button>
-                </div>
-              </Collapsible>
+                      Remove Task
+                    </Button>
+                  </div>
+                ))}
+
+                <Button
+                  type="button"
+                  variant="secondary"
+                  style={{ alignSelf: "flex-start" }}
+                  onClick={() =>
+                    setTaskRows((prev) => [
+                      ...prev,
+                      { name: "", description: "", expectedSignals: "" },
+                    ])
+                  }
+                >
+                  Add Task
+                </Button>
+              </div>
             </div>
 
             {error && (
@@ -536,18 +597,16 @@ export default function HomeClient() {
         </Card>
       </section>
 
-      {/* Bottom Grid */}
       <section
         style={{
-          maxWidth: 760,
-          margin: "24px auto 48px",
+          maxWidth: 900,
+          margin: "20px auto 48px",
           padding: "0 24px",
           display: "grid",
           gridTemplateColumns: "1.5fr 1fr",
           gap: 16,
         }}
       >
-        {/* Recent Runs */}
         <Card>
           <div
             style={{
@@ -574,48 +633,61 @@ export default function HomeClient() {
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
               {runs.map((run) => (
-                <a
+                <div
                   key={run.id}
-                  href={`/runs/${run.id}`}
                   style={{
-                    display: "flex",
+                    display: "grid",
+                    gridTemplateColumns: "1fr auto",
+                    gap: 8,
                     alignItems: "center",
-                    gap: 10,
-                    padding: "8px 12px",
-                    textDecoration: "none",
-                    borderRadius: "var(--radius)",
-                    border: "1px solid var(--border-default)",
-                    transition: "border-color 0.15s",
-                  }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.borderColor = "var(--border-emphasis)";
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.borderColor = "var(--border-default)";
                   }}
                 >
-                  <StatusDot status={run.status} size={6} />
-                  <span
+                  <Link
+                    href={`/runs/${run.id}`}
                     style={{
-                      flex: 1,
-                      fontFamily: "var(--font-mono)",
-                      fontSize: 12,
-                      color: "var(--text-primary)",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
+                      padding: "8px 12px",
+                      textDecoration: "none",
+                      borderRadius: "var(--radius)",
+                      border: "1px solid var(--border-default)",
+                      transition: "border-color 0.15s",
                     }}
                   >
-                    {run.docsUrl}
-                  </span>
-                  <MonoLabel>{run.status}</MonoLabel>
-                </a>
+                    <StatusDot status={run.status} size={6} />
+                    <span
+                      style={{
+                        flex: 1,
+                        fontFamily: "var(--font-mono)",
+                        fontSize: 12,
+                        color: "var(--text-primary)",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {run.docsUrl}
+                    </span>
+                    <MonoLabel>{run.status}</MonoLabel>
+                  </Link>
+                  <Button
+                    type="button"
+                    variant="danger"
+                    style={{ padding: "6px 10px", fontSize: 11 }}
+                    disabled={deletingRunId === run.id}
+                    onClick={() => {
+                      void onDeleteRun(run.id);
+                    }}
+                  >
+                    {deletingRunId === run.id ? "Deleting" : "Delete"}
+                  </Button>
+                </div>
               ))}
             </div>
           )}
         </Card>
 
-        {/* Run Monitor */}
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <MetricCard label="Running" value={runStats.running} />
           <MetricCard label="Completed" value={runStats.completed} accent />

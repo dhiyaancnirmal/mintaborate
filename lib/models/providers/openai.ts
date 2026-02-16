@@ -37,6 +37,7 @@ export async function openAIStyleCompletion(
     providerLabel?: ModelProvider;
     defaultBaseUrl?: string;
     fallbackApiKeyEnvVar?: string;
+    extraHeaders?: Record<string, string>;
   },
 ): Promise<TextCompletionResponse> {
   const providerLabel = options?.providerLabel ?? "openai";
@@ -64,6 +65,7 @@ export async function openAIStyleCompletion(
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${apiKey}`,
+          ...(options?.extraHeaders ?? {}),
         },
         body: JSON.stringify(payload),
         signal: controller.signal,

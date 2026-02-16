@@ -6,22 +6,29 @@ const envSchema = z.object({
   DATABASE_URL: z.string().default("file:./data/mintaborate.db"),
 
   DEFAULT_RUN_MODEL_PROVIDER: z
-    .enum(["openai", "anthropic", "openai-compatible"])
-    .default("openai"),
-  DEFAULT_RUN_MODEL: z.string().default("gpt-5-mini"),
+    .enum(["openai", "anthropic", "openai-compatible", "gemini", "openrouter"])
+    .default("openrouter"),
+  DEFAULT_RUN_MODEL: z.string().default("openrouter/free"),
   DEFAULT_JUDGE_MODEL_PROVIDER: z
-    .enum(["openai", "anthropic", "openai-compatible"])
-    .default("openai"),
-  DEFAULT_JUDGE_MODEL: z.string().default("gpt-5-mini"),
+    .enum(["openai", "anthropic", "openai-compatible", "gemini", "openrouter"])
+    .default("openrouter"),
+  DEFAULT_JUDGE_MODEL: z.string().default("openrouter/free"),
 
   OPENAI_API_KEY: z.string().optional(),
   ANTHROPIC_API_KEY: z.string().optional(),
   OPENAI_COMPATIBLE_API_KEY: z.string().optional(),
   OPENAI_COMPATIBLE_BASE_URL: z.string().optional(),
+  GEMINI_API_KEY: z.string().optional(),
+  GEMINI_BASE_URL: z.string().optional(),
+  OPENROUTER_API_KEY: z.string().optional(),
+  OPENROUTER_BASE_URL: z.string().optional(),
+  OPENROUTER_APP_URL: z.string().optional(),
+  OPENROUTER_APP_NAME: z.string().optional(),
 
   DEFAULT_TASK_COUNT: z.coerce.number().int().min(1).max(200).default(10),
   DEFAULT_EXECUTION_CONCURRENCY: z.coerce.number().int().min(1).max(20).default(3),
   DEFAULT_JUDGE_CONCURRENCY: z.coerce.number().int().min(1).max(20).default(3),
+  DEFAULT_ENABLE_SKILL_OPTIMIZATION: z.coerce.boolean().default(false),
   DEFAULT_WORKER_COUNT: z.coerce.number().int().min(1).max(12).default(3),
   MAX_WORKER_COUNT: z.coerce.number().int().min(1).max(64).default(12),
   DEFAULT_MAX_STEPS_PER_TASK: z.coerce.number().int().min(1).max(64).default(8),
@@ -56,6 +63,14 @@ function getDefaultApiKeyEnv(provider: ModelConfig["provider"]): string {
     return "OPENAI_COMPATIBLE_API_KEY";
   }
 
+  if (provider === "gemini") {
+    return "GEMINI_API_KEY";
+  }
+
+  if (provider === "openrouter") {
+    return "OPENROUTER_API_KEY";
+  }
+
   return "OPENAI_API_KEY";
 }
 
@@ -70,13 +85,17 @@ export function buildDefaultModelConfig(kind: "run" | "judge"): ModelConfig {
     model,
     temperature: kind === "judge" ? 0 : 0.2,
     maxTokens: 2000,
-    timeoutMs: 120_000,
-    retries: 2,
+    timeoutMs: 45_000,
+    retries: 1,
     apiKeyEnvVar: getDefaultApiKeyEnv(provider),
     baseUrl:
       provider === "openai-compatible"
         ? env.OPENAI_COMPATIBLE_BASE_URL ?? "https://api.openai.com/v1"
-        : undefined,
+        : provider === "gemini"
+          ? env.GEMINI_BASE_URL ?? "https://generativelanguage.googleapis.com/v1beta/openai"
+          : provider === "openrouter"
+            ? env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1"
+            : undefined,
   };
 }
 
@@ -90,6 +109,7 @@ export function buildDefaultRunConfig(taskCount?: number): Omit<RunConfig, "budg
     judgeModel: buildDefaultModelConfig("judge"),
     executionConcurrency: env.DEFAULT_EXECUTION_CONCURRENCY,
     judgeConcurrency: env.DEFAULT_JUDGE_CONCURRENCY,
+    enableSkillOptimization: env.DEFAULT_ENABLE_SKILL_OPTIMIZATION,
     tieBreakEnabled: false,
     budget: {
       maxTasks: taskCount ?? env.DEFAULT_TASK_COUNT,

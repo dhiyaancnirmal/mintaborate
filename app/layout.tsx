@@ -18,12 +18,6 @@ export default function RootLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en">
-      <head>
-        <link
-          href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&display=swap"
-          rel="stylesheet"
-        />
-      </head>
       <body className={`${inter.variable} antialiased`}>{children}</body>
     </html>
   );

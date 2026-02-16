@@ -1,6 +1,6 @@
 import pLimit from "p-limit";
 import { createHash } from "node:crypto";
-import { extractMarkdownLinks, keepSameHost } from "@/lib/ingestion/discovery";
+import { extractHtmlLinks, extractMarkdownLinks, keepSameHost } from "@/lib/ingestion/discovery";
 import { normalizeDocsUrl, toMintlifyMarkdownUrl } from "@/lib/ingestion/normalize";
 
 export type ArtifactType = "llms_full" | "llms" | "skill" | "page_md" | "html_fallback";
@@ -110,10 +110,19 @@ export async function ingestDocumentation(
   const discoveredFromLlms = llmsText ? extractMarkdownLinks(llmsText, root) : [];
   const discoveredFromFull = llmsFullText ? extractMarkdownLinks(llmsFullText, root) : [];
 
-  const discoveredPages = keepSameHost([...discoveredFromLlms, ...discoveredFromFull], root).slice(
+  let discoveredPages = keepSameHost([...discoveredFromLlms, ...discoveredFromFull], root).slice(
     0,
     pageFetchLimit,
   );
+
+  let rootHtmlForDiscovery: string | null = null;
+  if (discoveredPages.length === 0) {
+    rootHtmlForDiscovery = await fetchText(root, timeoutMs);
+    if (rootHtmlForDiscovery) {
+      const discoveredFromHtml = extractHtmlLinks(rootHtmlForDiscovery, root);
+      discoveredPages = keepSameHost(discoveredFromHtml, root).slice(0, pageFetchLimit);
+    }
+  }
 
   const limiter = pLimit(pageFetchConcurrency);
 
@@ -122,17 +131,31 @@ export async function ingestDocumentation(
       limiter(async () => {
         const markdownUrl = toMintlifyMarkdownUrl(url);
         const markdown = await fetchText(markdownUrl, timeoutMs);
-        if (!markdown) {
+        if (markdown) {
+          return {
+            artifactType: "page_md" as const,
+            sourceUrl: markdownUrl,
+            content: markdown,
+            contentHash: hashContent(markdown),
+            metadata: {
+              originalUrl: url,
+            },
+          };
+        }
+
+        const html = await fetchText(url, timeoutMs);
+        if (!html) {
           return null;
         }
 
         return {
-          artifactType: "page_md" as const,
-          sourceUrl: markdownUrl,
-          content: markdown,
-          contentHash: hashContent(markdown),
+          artifactType: "html_fallback" as const,
+          sourceUrl: url,
+          content: html,
+          contentHash: hashContent(html),
           metadata: {
             originalUrl: url,
+            fallback: "page_html",
           },
         };
       }),
@@ -145,8 +168,21 @@ export async function ingestDocumentation(
     }
   }
 
+  const hasPageArtifacts = pageArtifacts.some((artifact) => artifact !== null);
+  if (!hasPageArtifacts && rootHtmlForDiscovery) {
+    artifacts.push({
+      artifactType: "html_fallback",
+      sourceUrl: root,
+      content: rootHtmlForDiscovery,
+      contentHash: hashContent(rootHtmlForDiscovery),
+      metadata: {
+        fallback: "root_html_discovery",
+      },
+    });
+  }
+
   if (artifacts.length === 0) {
-    const htmlFallback = await fetchText(root, timeoutMs);
+    const htmlFallback = rootHtmlForDiscovery ?? await fetchText(root, timeoutMs);
     if (htmlFallback) {
       artifacts.push({
         artifactType: "html_fallback",

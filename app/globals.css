@@ -12,7 +12,7 @@
   /* Borders */
   --border-default: rgba(255, 255, 255, 0.08);
   --border-emphasis: rgba(255, 255, 255, 0.15);
-  --border-accent: rgba(37, 224, 135, 0.35);
+  --border-accent: rgba(34, 224, 125, 0.35);
 
   /* Text */
   --text-primary: #f0f1f0;
@@ -20,11 +20,11 @@
   --text-muted: #606360;
 
   /* Accent */
-  --accent: rgb(37, 224, 135);
-  --accent-muted: rgba(37, 224, 135, 0.15);
+  --accent: rgb(34, 224, 125);
+  --accent-muted: rgba(34, 224, 125, 0.15);
 
   /* Status */
-  --status-pass: rgb(37, 224, 135);
+  --status-pass: rgb(34, 224, 125);
   --status-fail: rgb(239, 68, 68);
   --status-running: rgb(59, 130, 246);
   --status-pending: rgb(107, 114, 128);
@@ -54,7 +54,7 @@ a {
 }
 
 ::selection {
-  background: rgba(37, 224, 135, 0.28);
+  background: rgba(34, 224, 125, 0.28);
   color: #00160a;
 }
 

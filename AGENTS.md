@@ -1,64 +1,70 @@
 # AGENTS.md
 
 ## Project Context
-Read PROJECT.md first. Mintaborate is a documentation agent-readiness testing tool. It runs AI agent tasks against Mintlify documentation sites and scores how well the docs support agent workflows.
+Read `PROJECT.md` first.
+
+Mintaborate simulates real developer-agent implementation workflows against documentation and measures whether docs lead to working outcomes. Mintlify ingestion paths are prioritized, but the system supports generic docs.
+
+Primary objective: produce evidence-backed diagnostics and actionable documentation fixes, not only a readability score.
 
 ## Tech Stack
-- **Framework:** Next.js 15+ (App Router, React 19, Server Components, Server Actions)
+- **Framework:** Next.js 16+ (App Router, React 19, Server Components, Server Actions)
 - **Language:** TypeScript (strict mode)
 - **Styling:** Tailwind CSS 4+ with shadcn/ui components
+- **Data:** SQLite + Drizzle ORM
 - **Deployment:** Vercel
-- **AI/LLM:** Anthropic Claude API (claude-sonnet-4-20250514 for task execution, claude-sonnet-4-20250514 for evaluation/judging)
-- **Font:** Inter (variable) — matches Mintlify's brand
-- **Primary accent color:** `rgb(36, 224, 126)` / `#24E07E` — Mintlify's signature green
+- **AI/LLM:** Provider-agnostic model adapters (OpenAI, Anthropic, OpenAI-compatible endpoints)
+- **Font:** Inter (variable)
+- **Primary accent color:** `rgb(36, 224, 126)` / `#24E07E`
 
 ## Design Direction
-This project should visually feel like it *belongs* in the Mintlify ecosystem. Clean, minimal, developer-focused. Dark mode default. Use Inter variable font throughout. The green accent should be used sparingly — for scores, pass indicators, key CTAs. The overall aesthetic should be polished and premium, not generic.
+The UI should feel like it belongs in the Mintlify ecosystem: clean, minimal, developer-focused, dark-mode-first, restrained use of green accents for key status and CTA moments.
 
-Reference Mintlify's own site (mintlify.com) for design language — they use a lot of subtle gradients, clean card layouts, and restrained use of color.
+Reference [mintlify.com](https://mintlify.com) for visual language: subtle gradients, clean card layouts, high signal-to-noise.
 
 ## Architecture Overview
-
 The app has three main concerns:
 
 ### 1. Documentation Ingestion
-Given a Mintlify docs URL, fetch and parse the documentation. Multiple approaches:
-- Fetch `/llms.txt` and `/llms-full.txt` for structured content
-- Fetch `/skill.md` for the existing agent capability summary  
-- Use the site's MCP server if available
-- Fall back to scraping individual pages as markdown (append `.md` to any Mintlify page URL)
+Given a docs URL, fetch and parse documentation with Mintlify-first paths:
+- Fetch `/llms.txt` and `/llms-full.txt`
+- Fetch `/skill.md`
+- Use site MCP server when available
+- Fall back to markdown page fetches and HTML scraping
 
-### 2. Task Definition & Execution
-Define agent tasks that represent real things a developer would try to do using the docs. For example:
-- "How do I authenticate with the API?"
-- "Set up a webhook listener"
-- "Deploy to production"
-- "Configure rate limiting"
+### 2. Task Definition and Execution
+Define implementation-oriented tasks a developer would delegate to an agent, then execute with multi-step workers using only documentation context.
 
-Then run an AI agent that attempts each task using *only* the documentation as context. The agent should behave like a developer reading the docs — it searches, reads pages, follows links, and tries to produce a working answer.
+Each task follows an iterative execution loop:
+- `retrieve -> plan -> act -> reflect`
 
-### 3. Evaluation & Scoring
-Use LLM-as-judge to evaluate each task attempt:
-- Did the agent produce a correct, actionable answer?
-- Was the answer grounded in the documentation (not hallucinated)?
-- Where did it struggle? What was missing from the docs?
-- Classify failures: missing content, ambiguous instructions, outdated examples, insufficient detail, broken links, etc.
+Persist full traces (retrieval choices, model I/O, citations, decisions, and run telemetry).
 
-Display results as a dashboard with per-task pass/fail, overall score, and actionable diagnostics.
+### 3. Outcome Evaluation and Failure Attribution
+Evaluate attempts in two stages:
+- Deterministic checks first (citation presence, signal coverage, step depth, termination behavior)
+- LLM judge second (completeness, correctness, groundedness, actionability)
+
+Classify failure causes and always attach evidence-backed, actionable doc recommendations.
 
 ## File Structure Guidance
-Use Next.js App Router conventions. Keep it simple:
-- `app/` — pages and layouts
-- `components/` — React components
-- `lib/` — utilities, API clients, types
-- `app/api/` — API routes for LLM calls and doc fetching
+Use Next.js App Router conventions:
+- `app/` - pages and layouts
+- `components/` - shared UI components (if/when added)
+- `lib/` - utilities, orchestration, adapters, types
+- `app/api/` - API routes for runs, ingestion, and model calls
 
-## Key Decisions for the Agent
-- Use server components where possible, client components only when needed for interactivity
-- All LLM API calls happen server-side (API routes or server actions)
-- The app should work as a single-page flow: paste URL → configure tasks → run → view results
-- Keep the scope tight. This is a demo, not a production SaaS. Optimize for "looks great in a 3-minute Screen Studio video"
-- Don't over-engineer. No auth, no database, no user accounts. Everything is ephemeral per session.
+## Key Decisions For Agents Working In This Repo
+- Use Server Components by default; use Client Components only when interactivity requires them
+- Keep model/API calls server-side only
+- Preserve single-flow UX: paste URL -> configure tasks/workers -> run -> inspect report
+- Keep scope demo-focused and execution-oriented
+- Do not over-engineer (no auth, no multi-tenant accounts)
+- Maintain reproducibility via SQLite persistence
 
 ## What Good Looks Like
-The demo should be impressive when someone pastes a real Mintlify docs URL (like docs.anthropic.com or docs.cursor.com) and sees a scored report card appear. The visual impact of green checkmarks and red X's next to real documentation tasks is what sells this.
+A strong demo run should clearly show:
+- Which tasks succeeded and failed
+- Why failures happened (trace + attribution)
+- What doc changes would raise success rate
+- Optional directional comparison across docs platforms with explicit fairness caveats

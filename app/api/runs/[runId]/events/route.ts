@@ -26,6 +26,11 @@ export async function GET(
   context: { params: Promise<{ runId: string }> },
 ): Promise<Response> {
   const { runId } = await context.params;
+  const existingRun = await getRun(runId);
+
+  if (!existingRun) {
+    return Response.json({ error: "Run not found" }, { status: 404 });
+  }
 
   const stream = new ReadableStream({
     async start(controller) {
